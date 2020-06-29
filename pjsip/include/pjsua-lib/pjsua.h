@@ -310,13 +310,8 @@ typedef struct pj_stun_resolve_result pj_stun_resolve_result;
 /**
  * Memory increment for PJSUA account.
  */
-<<<<<<< HEAD
-#ifndef PJSUA_POOL_ACC_INC
-#   define PJSUA_POOL_ACC_INC	256
-=======
 #ifndef PJSUA_POOL_INC_ACC
 #   define PJSUA_POOL_INC_ACC	256
->>>>>>> pj-pool-sizes
 #endif
 
 /**

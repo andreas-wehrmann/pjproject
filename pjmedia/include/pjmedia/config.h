@@ -68,13 +68,8 @@
 /**
  * Memory increment for evnt manager.
  */
-<<<<<<< HEAD
-#ifndef PJMEDIA_POOL_EVTMGR_INC
-#   define PJMEDIA_POOL_EVTMGR_INC		500
-=======
 #ifndef PJMEDIA_POOL_INC_EVTMGR
 #   define PJMEDIA_POOL_INC_EVTMGR		500
->>>>>>> pj-pool-sizes
 #endif
 
 /**

@@ -20,6 +20,7 @@ add_library(pjsip
   src/pjsip/sip_parser.c
   src/pjsip/sip_tel_uri.c
   src/pjsip/sip_uri.c
+  src/pjsip/sip_urn_rewrite.c
   src/pjsip/sip_endpoint.c
   src/pjsip/sip_util.c
   src/pjsip/sip_util_proxy.c
@@ -76,6 +77,7 @@ target_sources(pjsip
       include/pjsip/sip_types.h
       include/pjsip/sip_ua_layer.h
       include/pjsip/sip_uri.h
+      include/pjsip/sip_urn_rewrite.h
       include/pjsip/sip_util.h
 )
 

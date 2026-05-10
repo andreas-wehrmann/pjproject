@@ -696,6 +696,7 @@
     <ClCompile Include="..\src\pjsip\sip_transport_udp.c" />
     <ClCompile Include="..\src\pjsip\sip_ua_layer.c" />
     <ClCompile Include="..\src\pjsip\sip_uri.c" />
+    <ClCompile Include="..\src\pjsip\sip_urn_rewrite.c" />
     <ClCompile Include="..\src\pjsip\sip_util.c" />
     <ClCompile Include="..\src\pjsip\sip_util_proxy.c" />
     <ClCompile Include="..\src\pjsip\sip_util_statefull.c" />
@@ -729,6 +730,7 @@
     <ClInclude Include="..\include\pjsip\sip_types.h" />
     <ClInclude Include="..\include\pjsip\sip_ua_layer.h" />
     <ClInclude Include="..\include\pjsip\sip_uri.h" />
+    <ClInclude Include="..\include\pjsip\sip_urn_rewrite.h" />
     <ClInclude Include="..\include\pjsip\sip_util.h" />
   </ItemGroup>
   <ItemGroup>

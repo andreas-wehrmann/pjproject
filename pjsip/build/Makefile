@@ -60,6 +60,7 @@ export PJSIP_SRCDIR = ../src/pjsip
 export PJSIP_OBJS += $(OS_OBJS) $(M_OBJS) $(CC_OBJS) $(HOST_OBJS) \
 		sip_config.o sip_multipart.o \
 		sip_errno.o sip_msg.o sip_parser.o sip_tel_uri.o sip_uri.o \
+		sip_urn_rewrite.o \
 		sip_endpoint.o sip_util.o sip_util_proxy.o \
 		sip_resolve.o sip_transport.o sip_transport_loop.o \
 		sip_transport_udp.o sip_transport_tcp.o \

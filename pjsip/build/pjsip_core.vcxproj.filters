@@ -74,6 +74,9 @@
     <ClCompile Include="..\src\pjsip\sip_uri.c">
       <Filter>Source Files\Messaging and Parsing %28.c%29</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\pjsip\sip_urn_rewrite.c">
+      <Filter>Source Files\Messaging and Parsing %28.c%29</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\pjsip\sip_config.c">
       <Filter>Source Files\Core %28.c%29</Filter>
     </ClCompile>
@@ -167,6 +170,9 @@
       <Filter>Header Files\Messaging and Parsing %28.h%29</Filter>
     </ClInclude>
     <ClInclude Include="..\include\pjsip\sip_uri.h">
+      <Filter>Header Files\Messaging and Parsing %28.h%29</Filter>
+    </ClInclude>
+    <ClInclude Include="..\include\pjsip\sip_urn_rewrite.h">
       <Filter>Header Files\Messaging and Parsing %28.h%29</Filter>
     </ClInclude>
     <ClInclude Include="..\include\pjsip\sip_endpoint.h">

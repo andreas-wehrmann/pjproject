@@ -422,6 +422,20 @@ struct uri_test
         "urn:example:a123,z456#789"
     },
     {
+        /* r-component may itself contain '?' (only "?=" terminates it). */
+        PJ_SUCCESS,
+        "urn:example:a123,z456?+ab?cd",
+        &create_urn_example,
+        "urn:example:a123,z456?+ab?cd"
+    },
+    {
+        /* q-component may itself contain "?=" (it runs to the end). */
+        PJ_SUCCESS,
+        "urn:example:a123,z456?=a?=b",
+        &create_urn_example,
+        "urn:example:a123,z456?=a?=b"
+    },
+    {
         /* Percent-encoding hex digits compare case-insensitively. */
         PJ_SUCCESS,
         "urn:example:a123%2Cz456",

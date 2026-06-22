@@ -26,18 +26,18 @@
 #include <pj/except.h>
 #include <pjlib-util/scanner.h>
 
-/* Characters allowed (besides alphanumerics) in the part of a URN that follows
- * the NID, i.e. the NSS and the optional r-/q-/f-components. This is the union
- * of RFC 3986 'pchar' (unreserved marks, sub-delims, ':' and '@'), the '%' of
- * percent-encoding, '/', and the '?' and '#' separators that introduce the
- * optional components. Scanning this set in one go lets us capture the whole
- * "namestring" and split it afterwards.
+/* RFC 3986 'pchar' excluding alphanumerics and the pct-encoding "%": the
+ * unreserved marks, the sub-delims, ":" and "@". Alphanumerics and "%" are
+ * added to the character specs separately.
  */
-#define URN_NAMESTRING      "-._~!$&'()*+,;=:@/%?#"
+#define URN_PCHAR           "-._~!$&'()*+,;=:@"
 
 static pj_cis_buf_t cis_buf;
-static pj_cis_t pjsip_URN_NID_SPEC;
-static pj_cis_t pjsip_URN_NAMESTRING_SPEC;
+static pj_cis_t pjsip_URN_NID_SPEC;     /* NID = alphanum / "-".                */
+static pj_cis_t pjsip_URN_NSS_SPEC;     /* pchar / "/"; also the r-component    */
+                                        /* characters other than '?'.          */
+static pj_cis_t pjsip_URN_QF_SPEC;      /* pchar / "/" / "?"; the q- and        */
+                                        /* f-component characters.              */
 
 static pj_str_t pjsip_URN_STR = { "urn", 3 };
 
@@ -104,11 +104,21 @@ pj_status_t pjsip_urn_uri_subsys_init(void)
     pj_cis_add_num(&pjsip_URN_NID_SPEC);
     pj_cis_add_str(&pjsip_URN_NID_SPEC, "-");
 
-    status = pj_cis_init(&cis_buf, &pjsip_URN_NAMESTRING_SPEC);
+    /* NSS = pchar *(pchar / "/"). Excludes '?' and '#' so the scanner stops at
+     * the first optional component or at the end of the URN.
+     */
+    status = pj_cis_init(&cis_buf, &pjsip_URN_NSS_SPEC);
     PJ_ASSERT_RETURN(status==PJ_SUCCESS, status);
-    pj_cis_add_alpha(&pjsip_URN_NAMESTRING_SPEC);
-    pj_cis_add_num(&pjsip_URN_NAMESTRING_SPEC);
-    pj_cis_add_str(&pjsip_URN_NAMESTRING_SPEC, URN_NAMESTRING);
+    pj_cis_add_alpha(&pjsip_URN_NSS_SPEC);
+    pj_cis_add_num(&pjsip_URN_NSS_SPEC);
+    pj_cis_add_str(&pjsip_URN_NSS_SPEC, URN_PCHAR "/%");
+
+    /* q-component and f-component have the same characters as the NSS plus
+     * '?' (which they may contain literally).
+     */
+    status = pj_cis_dup(&pjsip_URN_QF_SPEC, &pjsip_URN_NSS_SPEC);
+    PJ_ASSERT_RETURN(status==PJ_SUCCESS, status);
+    pj_cis_add_str(&pjsip_URN_QF_SPEC, "?");
 
     status = pjsip_register_uri_parser("urn", &urn_uri_parse);
     PJ_ASSERT_RETURN(status==PJ_SUCCESS, status);
@@ -139,8 +149,8 @@ static pj_ssize_t urn_uri_print( pjsip_uri_context_e context,
                                  const pjsip_urn_uri *uri,
                                  char *buf, pj_size_t size)
 {
-    char *startbuf = buf;
-    char *endbuf = buf+size-1; /* Reserve one byte for NULL terminator. */
+    char * const startbuf = buf;
+    char * const endbuf = buf+size-1; /* Reserve one byte for NULL terminator. */
 
     PJ_UNUSED_ARG(context);
 
@@ -261,20 +271,30 @@ static pjsip_urn_uri* urn_uri_clone(pj_pool_t *pool, const pjsip_urn_uri *rhs)
     return uri;
 }
 
-/* Parse urn: URI.
+/* Return PJ_TRUE if the scanner is positioned exactly on the two-character
+ * sequence c0 c1, with both characters available in the buffer. Used to detect
+ * the "?+" and "?=" component markers without consuming input or reading past
+ * the end of the buffer.
+ */
+static pj_bool_t urn_peek2(const pj_scanner *scanner, char c0, char c1)
+{
+    return scanner->curptr+1 < scanner->end &&
+           scanner->curptr[0] == c0 && scanner->curptr[1] == c1;
+}
+
+/* Parse urn: URI (RFC 8141).
  * This actually returns (pjsip_urn_uri *) type.
  */
 static void* urn_uri_parse( pj_scanner *scanner, pj_pool_t *pool,
                             pj_bool_t parse_params)
 {
     pjsip_urn_uri *uri;
-    pj_str_t token, rest;
-    char *p, *end, *hash, *qmark, *rq;
-    int skip_ws = scanner->skip_ws;
-    const pjsip_parser_const_t *pc = pjsip_parser_const();
+    pj_str_t token;
+    const int skip_ws = scanner->skip_ws;
+    const pjsip_parser_const_t * const pc = pjsip_parser_const();
 
-    /* The URN namestring is self-delimiting, so there are no SIP-style
-     * (";"-separated) parameters to optionally parse.
+    /* The URN namestring is self-delimiting (RFC 8141), so there are no
+     * SIP-style (";"-separated) parameters to optionally parse.
      */
     PJ_UNUSED_ARG(parse_params);
 
@@ -290,80 +310,80 @@ static void* urn_uri_parse( pj_scanner *scanner, pj_pool_t *pool,
     /* Create URI. */
     uri = pjsip_urn_uri_create(pool);
 
-    /* Parse NID, terminated by ':'. An empty NID makes pj_scan_get throw. */
+    /* NID, terminated by ':'. pj_scan_get throws if the NID is empty. */
     pj_scan_get(scanner, &pjsip_URN_NID_SPEC, &uri->nid);
     if (pj_scan_get_char(scanner) != ':')
         PJ_THROW(PJSIP_SYN_ERR_EXCEPTION);
     if (!urn_nid_valid(&uri->nid))
         PJ_THROW(PJSIP_SYN_ERR_EXCEPTION);
 
-    /* Parse the rest (NSS plus optional r-/q-/f-components) as a single token.
-     * An empty NSS makes pj_scan_get throw.
+    /* NSS = pchar *(pchar / "/"). The spec excludes '?' and '#', so the scanner
+     * stops at the first optional component. pj_scan_get throws if the NSS is
+     * empty.
      */
-    pj_scan_get(scanner, &pjsip_URN_NAMESTRING_SPEC, &rest);
+    pj_scan_get(scanner, &pjsip_URN_NSS_SPEC, &uri->nss);
 
-    p = rest.ptr;
-    end = rest.ptr + rest.slen;
-
-    /* f-component: everything after the first '#'. The fragment grammar does
-     * not allow '#', so the first '#' unambiguously starts the f-component.
+    /* Optional r-component, introduced by "?+". Since it may itself contain
+     * '?', it is terminated only by the "?=" that introduces a q-component, by
+     * the "#" that introduces an f-component, or by the end of the URN.
      */
-    hash = (char*)pj_memchr(p, '#', (pj_size_t)(end - p));
-    if (hash) {
-        uri->f_component.ptr = hash + 1;
-        uri->f_component.slen = end - (hash + 1);
-        end = hash;
+    if (urn_peek2(scanner, '?', '+')) {
+        char * const r_start = scanner->curptr + 2;
+
+        pj_scan_advance_n(scanner, 2, PJ_FALSE);    /* consume "?+" */
+
+        for (;;) {
+            /* Consume a run of r-component characters other than '?'. */
+            if (!pj_scan_is_eof(scanner) &&
+                pj_cis_match(&pjsip_URN_NSS_SPEC, (pj_uint8_t)*scanner->curptr))
+            {
+                pj_scan_get(scanner, &pjsip_URN_NSS_SPEC, &token);
+            }
+
+            /* Stop at the end of input or at any non r-component character
+             * (such as '#', '>' or whitespace).
+             */
+            if (pj_scan_is_eof(scanner) || *scanner->curptr != '?')
+                break;
+
+            /* "?=" introduces the q-component and ends the r-component. */
+            if (urn_peek2(scanner, '?', '='))
+                break;
+
+            /* Otherwise the '?' is part of the r-component. */
+            pj_scan_get_char(scanner);
+        }
+
+        uri->r_component.ptr = r_start;
+        uri->r_component.slen = scanner->curptr - r_start;
+        if (uri->r_component.slen == 0)
+            PJ_THROW(PJSIP_SYN_ERR_EXCEPTION);
     }
 
-    /* The NSS ends at the first '?' (which is not a valid NSS character). */
-    qmark = (char*)pj_memchr(p, '?', (pj_size_t)(end - p));
-    if (qmark == NULL) {
-        uri->nss.ptr = p;
-        uri->nss.slen = end - p;
-    } else {
-        uri->nss.ptr = p;
-        uri->nss.slen = qmark - p;
+    /* Optional q-component, introduced by "?=". q = pchar *(pchar / "/" / "?")
+     * runs to the f-component or to the end of the URN; pj_scan_get throws if
+     * it is empty.
+     */
+    if (urn_peek2(scanner, '?', '=')) {
+        pj_scan_advance_n(scanner, 2, PJ_FALSE);    /* consume "?=" */
+        pj_scan_get(scanner, &pjsip_URN_QF_SPEC, &uri->q_component);
+    }
 
-        rq = qmark;
-        if (end - rq >= 2 && rq[1] == '+') {
-            /* r-component: ends at the first "?=" (start of q-component) or
-             * at the end of the URN.
-             */
-            char *q = rq + 2;
-            char *qeq = NULL;
+    /* Any '?' remaining here did not introduce an r- or q-component, which is a
+     * syntax error (RFC 8141 Section 2).
+     */
+    if (!pj_scan_is_eof(scanner) && *scanner->curptr == '?')
+        PJ_THROW(PJSIP_SYN_ERR_EXCEPTION);
 
-            while (end - q >= 2) {
-                if (q[0] == '?' && q[1] == '=') {
-                    qeq = q;
-                    break;
-                }
-                ++q;
-            }
-
-            if (qeq) {
-                uri->r_component.ptr = rq + 2;
-                uri->r_component.slen = qeq - (rq + 2);
-                uri->q_component.ptr = qeq + 2;
-                uri->q_component.slen = end - (qeq + 2);
-            } else {
-                uri->r_component.ptr = rq + 2;
-                uri->r_component.slen = end - (rq + 2);
-            }
-        } else if (end - rq >= 2 && rq[1] == '=') {
-            /* q-component: runs to the end of the URN. */
-            uri->q_component.ptr = rq + 2;
-            uri->q_component.slen = end - (rq + 2);
-        } else {
-            /* A '?' that is not immediately followed by '+' or '=' is a
-             * syntax error (RFC 8141 Section 2).
-             */
-            PJ_THROW(PJSIP_SYN_ERR_EXCEPTION);
+    /* Optional f-component, introduced by "#". The fragment may be empty. */
+    if (!pj_scan_is_eof(scanner) && *scanner->curptr == '#') {
+        pj_scan_get_char(scanner);                  /* consume '#' */
+        if (!pj_scan_is_eof(scanner) &&
+            pj_cis_match(&pjsip_URN_QF_SPEC, (pj_uint8_t)*scanner->curptr))
+        {
+            pj_scan_get(scanner, &pjsip_URN_QF_SPEC, &uri->f_component);
         }
     }
-
-    /* The NSS must contain at least one character. */
-    if (uri->nss.slen == 0)
-        PJ_THROW(PJSIP_SYN_ERR_EXCEPTION);
 
     scanner->skip_ws = skip_ws;
     pj_scan_skip_whitespace(scanner);

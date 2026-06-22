@@ -26,6 +26,7 @@
 /* Messaging and parsing. */
 #include <pjsip/sip_uri.h>
 #include <pjsip/sip_tel_uri.h>
+#include <pjsip/sip_urn_uri.h>
 #include <pjsip/sip_msg.h>
 #include <pjsip/sip_multipart.h>
 #include <pjsip/sip_parser.h>

@@ -82,6 +82,8 @@ static pjsip_uri *create_uri37( pj_pool_t *pool );
 static pjsip_uri *create_uri38( pj_pool_t *pool );
 static pjsip_uri *create_uri39( pj_pool_t *pool );
 static pjsip_uri *create_uri40( pj_pool_t *pool );
+static pjsip_uri *create_urn_example( pj_pool_t *pool );
+static pjsip_uri *create_urn_pct( pj_pool_t *pool );
 static pjsip_uri *create_dummy( pj_pool_t *pool );
 
 #define ERR_NOT_EQUAL   -1001
@@ -362,6 +364,132 @@ struct uri_test
         PJ_SUCCESS,
         "\"\\\"User\\\"\" <sip:localhost>",
         &create_uri40,
+    },
+
+    /***************************************************************************
+     * URN URI tests (RFC 8141). The reference URI built by the creator is
+     * compared against the parsed URI; for the equivalence cases the 'printed'
+     * field holds the parsed URI's canonical serialization (so the comparison
+     * tolerates the reference differing in case, exactly like the tel: tests).
+     */
+    {
+        /* Basic parse, serialize round-trip and equivalence. */
+        PJ_SUCCESS,
+        "urn:example:a123,z456",
+        &create_urn_example,
+        "urn:example:a123,z456"
+    },
+    {
+        /* All optional components present: round-trip, ignored in comparison. */
+        PJ_SUCCESS,
+        "urn:example:a123,z456?+abc?=xyz#789",
+        &create_urn_example,
+        "urn:example:a123,z456?+abc?=xyz#789"
+    },
+    {
+        /* Scheme is case-insensitive; serialized canonically in lower case. */
+        PJ_SUCCESS,
+        "URN:example:a123,z456",
+        &create_urn_example,
+        "urn:example:a123,z456"
+    },
+    {
+        /* NID is case-insensitive for equivalence (case preserved on print). */
+        PJ_SUCCESS,
+        "urn:EXAMPLE:a123,z456",
+        &create_urn_example,
+        "urn:EXAMPLE:a123,z456"
+    },
+    {
+        /* r-component is ignored for URN-equivalence. */
+        PJ_SUCCESS,
+        "urn:example:a123,z456?+abc",
+        &create_urn_example,
+        "urn:example:a123,z456?+abc"
+    },
+    {
+        /* q-component is ignored for URN-equivalence. */
+        PJ_SUCCESS,
+        "urn:example:a123,z456?=xyz",
+        &create_urn_example,
+        "urn:example:a123,z456?=xyz"
+    },
+    {
+        /* f-component is ignored for URN-equivalence. */
+        PJ_SUCCESS,
+        "urn:example:a123,z456#789",
+        &create_urn_example,
+        "urn:example:a123,z456#789"
+    },
+    {
+        /* Percent-encoding hex digits compare case-insensitively. */
+        PJ_SUCCESS,
+        "urn:example:a123%2Cz456",
+        &create_urn_pct,
+        "urn:example:a123%2Cz456"
+    },
+    {
+        /* "/" in the NSS is significant: not equivalent. */
+        ERR_NOT_EQUAL,
+        "urn:example:a123,z456/foo",
+        &create_urn_example,
+        NULL
+    },
+    {
+        /* NSS is case-sensitive outside percent-encoding: not equivalent. */
+        ERR_NOT_EQUAL,
+        "urn:example:A123,z456",
+        &create_urn_example,
+        NULL
+    },
+    {
+        /* Percent-encoding is NOT decoded: "%2C" is not equal to ",". */
+        ERR_NOT_EQUAL,
+        "urn:example:a123%2Cz456",
+        &create_urn_example,
+        NULL
+    },
+    {
+        /* Different NID: not equivalent. */
+        ERR_NOT_EQUAL,
+        "urn:other:a123,z456",
+        &create_urn_example,
+        NULL
+    },
+    {
+        /* Percent-encoded (confusable) NSS is not equal to the ASCII form. */
+        ERR_NOT_EQUAL,
+        "urn:example:%D0%B0123,z456",
+        &create_urn_example,
+        NULL
+    },
+    {
+        /* Syntax error: empty NSS. */
+        ERR_SYNTAX_ERR,
+        "urn:example:",
+        &create_dummy,
+        NULL
+    },
+    {
+        /* Syntax error: empty NID. */
+        ERR_SYNTAX_ERR,
+        "urn::a123,z456",
+        &create_dummy,
+        NULL
+    },
+    {
+        /* Syntax error: "?" not introducing an r- or q-component. */
+        ERR_SYNTAX_ERR,
+        "urn:example:a123?z456",
+        &create_dummy,
+        NULL
+    },
+    {
+        /* Syntax error: NID must begin with an alphanumeric. */
+        ERR_SYNTAX_ERR,
+        "urn:-bad:nss",
+        &create_dummy,
+        NULL
     }
 
 };
@@ -801,6 +929,28 @@ static pjsip_uri *create_uri40(pj_pool_t *pool)
     pj_strdup2(pool, &name_addr->display, "\\\"User\\\"");
     pj_strdup2(pool, &url->host, "localhost");
     return (pjsip_uri*)name_addr;
+}
+
+/* Reference URN "urn:example:a123,z456" -- the canonical assigned-name used by
+ * most of the RFC 8141 Section 3.2 equivalence examples.
+ */
+static pjsip_uri *create_urn_example(pj_pool_t *pool)
+{
+    pjsip_urn_uri *uri = pjsip_urn_uri_create(pool);
+
+    uri->nid = pj_str("example");
+    uri->nss = pj_str("a123,z456");
+    return (pjsip_uri*)uri;
+}
+
+/* Reference URN "urn:example:a123%2cz456" with lower-case percent-encoding. */
+static pjsip_uri *create_urn_pct(pj_pool_t *pool)
+{
+    pjsip_urn_uri *uri = pjsip_urn_uri_create(pool);
+
+    uri->nid = pj_str("example");
+    uri->nss = pj_str("a123%2cz456");
+    return (pjsip_uri*)uri;
 }
 
 static pjsip_uri *create_dummy(pj_pool_t *pool)

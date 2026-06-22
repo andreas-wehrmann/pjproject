@@ -1153,7 +1153,7 @@ PJ_INLINE(pjsip_cfg_t*) pjsip_cfg(void)
 #define PJSIP_MAX_HEADER_TYPES          72
 
 /** Maximum URI types. */
-#define PJSIP_MAX_URI_TYPES             4
+#define PJSIP_MAX_URI_TYPES             6
 
 /*****************************************************************************
  *  Default timeout settings, in miliseconds. 

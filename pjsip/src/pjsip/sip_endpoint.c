@@ -128,6 +128,9 @@ void deinit_sip_parser(void);
 /* Defined in sip_tel_uri.c */
 pj_status_t pjsip_tel_uri_subsys_init(void);
 
+/* Defined in sip_urn_uri.c */
+pj_status_t pjsip_urn_uri_subsys_init(void);
+
 
 /*
  * This is the global handler for memory allocation failure, for pools that
@@ -493,6 +496,9 @@ PJ_DEF(pj_status_t) pjsip_endpt_create(pj_pool_factory *pf,
 
     /* Init tel: uri */
     pjsip_tel_uri_subsys_init();
+
+    /* Init urn: uri */
+    pjsip_urn_uri_subsys_init();
 
     /* Get name. */
     if (name != NULL) {

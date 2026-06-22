@@ -19,6 +19,7 @@ add_library(pjsip
   src/pjsip/sip_msg.c
   src/pjsip/sip_parser.c
   src/pjsip/sip_tel_uri.c
+  src/pjsip/sip_urn_uri.c
   src/pjsip/sip_uri.c
   src/pjsip/sip_endpoint.c
   src/pjsip/sip_util.c
@@ -67,6 +68,7 @@ target_sources(pjsip
       include/pjsip/sip_private.h
       include/pjsip/sip_resolve.h
       include/pjsip/sip_tel_uri.h
+      include/pjsip/sip_urn_uri.h
       include/pjsip/sip_transaction.h
       include/pjsip/sip_transport.h
       include/pjsip/sip_transport_loop.h

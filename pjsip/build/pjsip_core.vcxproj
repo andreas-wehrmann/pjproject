@@ -688,6 +688,7 @@
     <ClCompile Include="..\src\pjsip\sip_parser.c" />
     <ClCompile Include="..\src\pjsip\sip_resolve.c" />
     <ClCompile Include="..\src\pjsip\sip_tel_uri.c" />
+    <ClCompile Include="..\src\pjsip\sip_urn_uri.c" />
     <ClCompile Include="..\src\pjsip\sip_transaction.c" />
     <ClCompile Include="..\src\pjsip\sip_transport.c" />
     <ClCompile Include="..\src\pjsip\sip_transport_loop.c" />
@@ -720,6 +721,7 @@
     <ClInclude Include="..\include\pjsip\sip_private.h" />
     <ClInclude Include="..\include\pjsip\sip_resolve.h" />
     <ClInclude Include="..\include\pjsip\sip_tel_uri.h" />
+    <ClInclude Include="..\include\pjsip\sip_urn_uri.h" />
     <ClInclude Include="..\include\pjsip\sip_transaction.h" />
     <ClInclude Include="..\include\pjsip\sip_transport.h" />
     <ClInclude Include="..\include\pjsip\sip_transport_loop.h" />

@@ -249,6 +249,14 @@ struct pjsip_uri
 #define PJSIP_URI_SCHEME_IS_TEL(url)    \
     (pj_stricmp2(pjsip_uri_get_scheme(url), "tel")==0)
 
+/**
+ * This macro checks that the URL is a "urn:" URL.
+ * @param url The URL (pointer to)
+ * @return non-zero if TRUE.
+ */
+#define PJSIP_URI_SCHEME_IS_URN(url)    \
+    (pj_stricmp2(pjsip_uri_get_scheme(url), "urn")==0)
+
 
 /**
  * Generic function to get the URI scheme.

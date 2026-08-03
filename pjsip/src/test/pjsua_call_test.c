@@ -17,9 +17,10 @@
  */
 
 /*
- * pjsua-level regression tests for the call media-count bounds checks that
- * prevent overflowing the fixed-size per-call media arrays
- * (pjsua_call.media[PJSUA_MAX_CALL_MEDIA]).
+ * pjsua-level regression tests for the handling of the per-call media count,
+ * i.e. the bounds checks that prevent overflowing the fixed-size per-call
+ * media arrays (pjsua_call.media[PJSUA_MAX_CALL_MEDIA]) and the media set a
+ * re-INVITE ends up with.
  *
  * Scenarios covered:
  *   1. Outgoing pjsua_call_make_call() rejects a call setting whose media
@@ -33,11 +34,18 @@
  *      resulting count would overflow, even though the requested setting
  *      alone is within the limit (apply_call_setting() accepts it). This is
  *      the reinit/reoffer path in pjsua_media_channel_init().
+ *   4. Same as 3 with a retained m-line whose media type is neither audio,
+ *      video nor text, so that a bounds check summing only the per-type
+ *      counts would under-count the existing media.
+ *   5. A re-INVITE raising the count of a media type that has a removed
+ *      (port zero) media re-enables that media instead of leaving it behind,
+ *      so the call really ends up with the requested number of active media.
  *
- * The over-limit settings are rejected before any media is instantiated, so
- * the tests use text media (txt_cnt) as the "second" media type: this keeps
- * the tests independent of whether video is compiled in, and no text media
- * is ever actually created (the settings are rejected first).
+ * Scenarios 1 to 4 reject the setting before any media is instantiated, so
+ * they use text media (txt_cnt) as the "second" media type: this keeps them
+ * independent of whether video is compiled in, and no text media is ever
+ * actually created. Scenario 5 needs media that really gets negotiated and
+ * therefore uses audio only.
  */
 
 #include "test.h"
@@ -145,6 +153,14 @@ static struct
      * local SDP offer, so the peer establishes a call holding a media slot
      * whose type is neither audio, video nor text. */
     pj_bool_t     inject_app_mline;
+    /* Audio count on_incoming_call answers with. A test that offers more than
+     * one audio media raises it, otherwise the callee would answer the surplus
+     * media with port 0. The answer latches it into the callee's call setting,
+     * which also caps the media the callee accepts in later re-INVITEs, so it
+     * must cover the whole test and not just the initial offer. */
+    unsigned      answer_aud_cnt;
+    /* Expected number of active audio media, for call_has_expected_audio(). */
+    unsigned      wait_aud_cnt;
 } g_ctx;
 
 
@@ -178,9 +194,9 @@ static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id,
     g_ctx.answer2_overlimit_status =
         pjsua_call_answer2(call_id, &opt, 200, NULL, NULL);
 
-    /* Establish the call with a valid single-audio setting. */
+    /* Establish the call, accepting the audio media the test needs. */
     pjsua_call_setting_default(&opt);
-    opt.aud_cnt = 1;
+    opt.aud_cnt = g_ctx.answer_aud_cnt;
     opt.vid_cnt = 0;
     opt.txt_cnt = 0;
     status = pjsua_call_answer2(call_id, &opt, 200, NULL, NULL);
@@ -265,6 +281,36 @@ static pj_bool_t call_is_confirmed(pjsua_call_id call_id)
     if (pjsua_call_get_info(call_id, &ci) != PJ_SUCCESS)
         return PJ_FALSE;
     return ci.state == PJSIP_INV_STATE_CONFIRMED;
+}
+
+/* Number of the call's media of the given type that got a media status, i.e.
+ * everything but the media that are disabled (m-line with port zero, status
+ * PJSUA_CALL_MEDIA_NONE) or failed to be created.
+ */
+static unsigned count_active_media(pjsua_call_id call_id, pjmedia_type type)
+{
+    pjsua_call_info ci;
+    unsigned i, cnt = 0;
+
+    if (pjsua_call_get_info(call_id, &ci) != PJ_SUCCESS)
+        return 0;
+
+    for (i = 0; i < ci.media_cnt; ++i) {
+        if (ci.media[i].type == type &&
+            ci.media[i].status != PJSUA_CALL_MEDIA_NONE &&
+            ci.media[i].status != PJSUA_CALL_MEDIA_ERROR)
+        {
+            ++cnt;
+        }
+    }
+
+    return cnt;
+}
+
+static pj_bool_t call_has_expected_audio(pjsua_call_id call_id)
+{
+    return count_active_media(call_id, PJMEDIA_TYPE_AUDIO) ==
+           g_ctx.wait_aud_cnt;
 }
 
 /* Tear down every call and pump the event loop until none remain (or a
@@ -514,6 +560,129 @@ static int test_reinit_bounds_untyped_mline(void)
 }
 
 
+/* Adding media while a removed media of the same type is still around.
+ *
+ * Removing a media keeps its m-line (with port zero) and only disables the
+ * media, so raising the count of that type again must first re-enable the
+ * disabled media and then append whatever is still missing. sort_media2()
+ * lists the enabled media of a type before the disabled ones, hence new media
+ * must be appended at the total count: appending at the enabled count instead
+ * overwrites the disabled media's entry, leaving it disabled and unrecognized,
+ * so the call ends up with fewer active media than requested while the request
+ * itself reports success.
+ */
+static int test_reinit_readd_removed_media(void)
+{
+    pjsua_call_setting opt;
+    pj_str_t uri = pj_str(g_ctx.self_uri);
+    pj_status_t status;
+    pjsua_call_id cid = PJSUA_INVALID_ID;
+    pjsua_call_info ci;
+
+    PJ_LOG(3, (THIS_FILE, "  reinit re-enables removed media when adding"));
+
+    /* The callee must accept every audio media this test offers, including
+     * the one added later on. It latches the setting into its own call setting
+     * when answering, and answers the later re-INVITEs from there, so it can
+     * be restored as soon as the call is up.
+     */
+    g_ctx.answer_aud_cnt = 3;
+
+    /* Establish a call with two audio media. */
+    pjsua_call_setting_default(&opt);
+    opt.aud_cnt = 2;
+    opt.vid_cnt = 0;
+    opt.txt_cnt = 0;
+    status = pjsua_call_make_call(g_ctx.acc_id, &uri, &opt, NULL, NULL, &cid);
+    if (status != PJ_SUCCESS) {
+        PJ_LOG(1, (THIS_FILE, "    make_call failed (%d)", status));
+        g_ctx.answer_aud_cnt = 1;
+        return -1400;
+    }
+
+    if (!wait_until(&call_is_confirmed, cid, 8000)) {
+        PJ_LOG(1, (THIS_FILE, "    call did not reach CONFIRMED in time"));
+        g_ctx.answer_aud_cnt = 1;
+        drain_all_calls();
+        return -1401;
+    }
+
+    g_ctx.answer_aud_cnt = 1;
+
+    g_ctx.wait_aud_cnt = 2;
+    if (!wait_until(&call_has_expected_audio, cid, 8000)) {
+        PJ_LOG(1, (THIS_FILE, "    expected 2 active audio media, got %u",
+                   count_active_media(cid, PJMEDIA_TYPE_AUDIO)));
+        drain_all_calls();
+        return -1402;
+    }
+
+    /* Remove one audio media; its m-line is kept with port zero. */
+    pjsua_call_setting_default(&opt);
+    opt.aud_cnt = 1;
+    opt.vid_cnt = 0;
+    opt.txt_cnt = 0;
+    status = pjsua_call_reinvite2(cid, &opt, NULL);
+    if (status != PJ_SUCCESS) {
+        PJ_LOG(1, (THIS_FILE, "    reinvite (remove) failed (%d)", status));
+        drain_all_calls();
+        return -1403;
+    }
+
+    g_ctx.wait_aud_cnt = 1;
+    if (!wait_until(&call_has_expected_audio, cid, 8000)) {
+        PJ_LOG(1, (THIS_FILE, "    expected 1 active audio media after "
+                   "removal, got %u",
+                   count_active_media(cid, PJMEDIA_TYPE_AUDIO)));
+        drain_all_calls();
+        return -1404;
+    }
+
+    /* Ask for three: the disabled media must be re-enabled and one new media
+     * appended.
+     */
+    pjsua_call_setting_default(&opt);
+    opt.aud_cnt = 3;
+    opt.vid_cnt = 0;
+    opt.txt_cnt = 0;
+    status = pjsua_call_reinvite2(cid, &opt, NULL);
+    if (status != PJ_SUCCESS) {
+        PJ_LOG(1, (THIS_FILE, "    reinvite (re-add) failed (%d)", status));
+        drain_all_calls();
+        return -1405;
+    }
+
+    /* This is the assertion that catches the media that is not re-enabled:
+     * without it only the appended media becomes active, so the call ends up
+     * with two instead of three active audio media.
+     */
+    g_ctx.wait_aud_cnt = 3;
+    if (!wait_until(&call_has_expected_audio, cid, 10000)) {
+        PJ_LOG(1, (THIS_FILE, "    expected 3 active audio media after "
+                   "re-adding, got %u",
+                   count_active_media(cid, PJMEDIA_TYPE_AUDIO)));
+        drain_all_calls();
+        return -1406;
+    }
+
+    /* Companion to the check above: it makes sure the three active media are
+     * the re-enabled one plus a single appended one, and not three newly
+     * appended ones next to the media that was removed.
+     */
+    status = pjsua_call_get_info(cid, &ci);
+    if (status != PJ_SUCCESS || ci.media_cnt != 3) {
+        PJ_LOG(1, (THIS_FILE, "    expected 3 media in the call, get_info "
+                   "returned %d with media_cnt %u", status,
+                   (status == PJ_SUCCESS? ci.media_cnt: 0)));
+        drain_all_calls();
+        return -1407;
+    }
+
+    drain_all_calls();
+    return 0;
+}
+
+
 /*****************************************************************************
  * Main entry point
  *****************************************************************************/
@@ -634,6 +803,9 @@ int pjsua_call_test(void)
      */
     minimize_msg_size(&lib_settings);
 
+    /* Default answer setting for the sub-tests that don't need more. */
+    g_ctx.answer_aud_cnt = 1;
+
     /* ---- Run sub-tests ---- */
     rc = test_make_call_bounds();
     if (rc != 0) goto on_return;
@@ -642,6 +814,9 @@ int pjsua_call_test(void)
     if (rc != 0) goto on_return;
 
     rc = test_reinit_bounds_untyped_mline();
+    if (rc != 0) goto on_return;
+
+    rc = test_reinit_readd_removed_media();
     if (rc != 0) goto on_return;
 
 on_return:

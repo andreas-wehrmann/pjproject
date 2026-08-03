@@ -2608,15 +2608,22 @@ pj_status_t pjsua_media_channel_init(pjsua_call_id call_id,
              * enabling any disabled/port-zeroed media first, then adding new
              * media whenever needed. Removing media is done by disabling
              * media with the lowest 'quality'.
+             *
+             * Note that sort_media2() lists the enabled media of a type first
+             * and the disabled ones after them (up to the total count), so new
+             * media must be appended at the total count. Appending at the
+             * enabled count instead would overwrite the entries of the
+             * disabled media, which would then neither be re-enabled nor be
+             * recognized as media of their type by the loop below.
              */
 
             /* Check if we need to add new audio */
             if (maudcnt < call->opt.aud_cnt &&
                 mtotaudcnt < call->opt.aud_cnt)
             {
-                for (mi = 0; mi < call->opt.aud_cnt - mtotaudcnt; ++mi)
-                    maudidx[maudcnt++] = (pj_uint8_t)call->med_prov_cnt++;
-                
+                for (mi = mtotaudcnt; mi < call->opt.aud_cnt; ++mi)
+                    maudidx[mi] = (pj_uint8_t)call->med_prov_cnt++;
+
                 mtotaudcnt = call->opt.aud_cnt;
             }
             maudcnt = call->opt.aud_cnt;
@@ -2625,8 +2632,8 @@ pj_status_t pjsua_media_channel_init(pjsua_call_id call_id,
             if (mvidcnt < call->opt.vid_cnt &&
                 mtotvidcnt < call->opt.vid_cnt)
             {
-                for (mi = 0; mi < call->opt.vid_cnt - mtotvidcnt; ++mi)
-                    mvididx[mvidcnt++] = (pj_uint8_t)call->med_prov_cnt++;
+                for (mi = mtotvidcnt; mi < call->opt.vid_cnt; ++mi)
+                    mvididx[mi] = (pj_uint8_t)call->med_prov_cnt++;
 
                 mtotvidcnt = call->opt.vid_cnt;
             }
@@ -2636,8 +2643,8 @@ pj_status_t pjsua_media_channel_init(pjsua_call_id call_id,
             if (mtxtcnt < call->opt.txt_cnt &&
                 mtottxtcnt < call->opt.txt_cnt)
             {
-                for (mi = 0; mi < call->opt.txt_cnt - mtottxtcnt; ++mi)
-                    mtxtidx[mtxtcnt++] = (pj_uint8_t)call->med_prov_cnt++;
+                for (mi = mtottxtcnt; mi < call->opt.txt_cnt; ++mi)
+                    mtxtidx[mi] = (pj_uint8_t)call->med_prov_cnt++;
 
                 mtottxtcnt = call->opt.txt_cnt;
             }

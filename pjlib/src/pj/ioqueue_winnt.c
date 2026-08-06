@@ -1370,12 +1370,42 @@ PJ_DEF(pj_status_t) pj_ioqueue_unregister( pj_ioqueue_key_t *key )
     //unsigned i;
     //pj_bool_t has_lock;
     enum { RETRY = 10 };
+    pj_grp_lock_t *grp_lock;
 
     PJ_ASSERT_RETURN(key, PJ_EINVAL);
 
-    /* Best effort to avoid double key-unregistration */
-    if (!key->grp_lock || key->closing)
+    /* Avoid double key-unregistration.
+     *
+     * The closing flag must be tested and set atomically, otherwise two
+     * threads unregistering the same key can both pass the test and both
+     * go on to close the socket and decrement the reference counter,
+     * resulting in a double close of an already recycled handle and a
+     * reference count underflow. The select and epoll backends perform
+     * this check under the key lock as well.
+     *
+     * Take our own reference on the group lock so that it stays alive
+     * for the remainder of this function, since decrement_counter() below
+     * may destroy the key (and reset key->grp_lock) as a side effect.
+     */
+    grp_lock = key->grp_lock;
+    if (!grp_lock)
         return PJ_SUCCESS;
+
+    pj_grp_lock_add_ref_dbg(grp_lock, "ioqueue", 0);
+    pj_grp_lock_acquire(grp_lock);
+
+    if (key->closing) {
+        pj_grp_lock_release(grp_lock);
+        pj_grp_lock_dec_ref_dbg(grp_lock, "ioqueue", 0);
+        return PJ_SUCCESS;
+    }
+
+    /* Mark key as closing. This prevents any new operation from being
+     * submitted on this key from now on.
+     */
+    key->closing = 1;
+
+    pj_grp_lock_release(grp_lock);
 
 #if PJ_HAS_TCP
     if (key->connecting) {
@@ -1396,9 +1426,6 @@ PJ_DEF(pj_status_t) pj_ioqueue_unregister( pj_ioqueue_key_t *key )
         pj_lock_release(ioqueue->lock);
     }
 #endif
-
-    /* Mark key as closing before closing handle. */
-    key->closing = 1;
 
     /* If concurrency is disabled, wait until the key has finished
      * processing the callback
@@ -1471,13 +1498,19 @@ PJ_DEF(pj_status_t) pj_ioqueue_unregister( pj_ioqueue_key_t *key )
     //    pj_ioqueue_unlock_key(key);
 
     TRACE((THIS_FILE, "UNREG key %p ref cnt %d",
-                      key, pj_grp_lock_get_ref(key->grp_lock)));
+                      key, pj_grp_lock_get_ref(grp_lock)));
 
     /* Decrement reference counter to destroy the key.
      * If the key has pending op, it will be destroyed only after the op is
      * cancelled (asynchronously).
      */
     decrement_counter(key);
+
+    /* Release the reference taken at the start of this function. This may
+     * be the one that finally destroys the group lock, so key must not be
+     * dereferenced after this point.
+     */
+    pj_grp_lock_dec_ref_dbg(grp_lock, "ioqueue", 0);
 
     return PJ_SUCCESS;
 }

@@ -656,7 +656,7 @@ PJ_DEF(pj_status_t) pj_ioqueue_register_sock2(pj_pool_t *pool,
     /* Set concurrency for this handle */
     status = pj_ioqueue_set_concurrency(rec, ioqueue->default_concurrency);
     if (status != PJ_SUCCESS)
-        return status;
+        goto on_return;
 
 #if PJ_HAS_TCP
     rec->connecting = 0;
@@ -665,14 +665,18 @@ PJ_DEF(pj_status_t) pj_ioqueue_register_sock2(pj_pool_t *pool,
     /* Set socket to nonblocking. */
     value = 1;
     rc = ioctlsocket(sock, FIONBIO, &value);
-    if (rc != 0)
-        return PJ_RETURN_OS_ERROR(WSAGetLastError());
+    if (rc != 0) {
+        status = PJ_RETURN_OS_ERROR(WSAGetLastError());
+        goto on_return;
+    }
 
     /* Associate with IOCP */
     hioq = CreateIoCompletionPort((HANDLE)sock, ioqueue->iocp,
                                   (ULONG_PTR)rec, 0);
-    if (!hioq)
-        return PJ_RETURN_OS_ERROR(GetLastError());
+    if (!hioq) {
+        status = PJ_RETURN_OS_ERROR(GetLastError());
+        goto on_return;
+    }
 
     /* Create group lock if not specified */
     if (!grp_lock) {
@@ -682,10 +686,8 @@ PJ_DEF(pj_status_t) pj_ioqueue_register_sock2(pj_pool_t *pool,
         status = pj_grp_lock_add_handler(grp_lock, rec->pool, rec,
                                          &key_on_destroy);
     }
-    if (status != PJ_SUCCESS) {
-        key_on_destroy(rec);
-        return status;
-    }
+    if (status != PJ_SUCCESS)
+        goto on_return;
 
     rec->grp_lock = grp_lock;
 
@@ -697,6 +699,20 @@ PJ_DEF(pj_status_t) pj_ioqueue_register_sock2(pj_pool_t *pool,
     /* Finally */
     *key = rec;
     return PJ_SUCCESS;
+
+on_return:
+    /* Registration failed after the key has been taken from the free list.
+     * Return the key to the free list, otherwise the preallocated key pool
+     * shrinks by one on every failed registration until registration always
+     * fails with PJ_ETOOMANY. See #5092.
+     *
+     * key_on_destroy() releases the key pool, clears grp_lock, and moves the
+     * key from the active list back to the free list. This is safe here
+     * because the key has never been used for any I/O operation, so it has
+     * no pending op and no reference has been taken on it yet.
+     */
+    key_on_destroy(rec);
+    return status;
 }
 
 

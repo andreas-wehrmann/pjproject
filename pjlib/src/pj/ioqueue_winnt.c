@@ -323,6 +323,7 @@ static int check_connecting( pj_ioqueue_t *ioqueue )
         struct 
         {
             pj_ioqueue_key_t *key;
+            pj_grp_lock_t    *grp_lock;
             pj_status_t       status;
         } events[PJ_IOQUEUE_MAX_EVENTS_IN_SINGLE_POLL-1];
 
@@ -337,13 +338,15 @@ static int check_connecting( pj_ioqueue_t *ioqueue )
                 result < WAIT_OBJECT_0+ioqueue->connecting_count) 
             {
                 WSANETWORKEVENTS net_events;
+                pj_ioqueue_key_t *key;
 
                 /* Got completed connect(). */
                 unsigned pos = result - WAIT_OBJECT_0;
-                events[count].key = ioqueue->connecting_keys[pos];
+                key = ioqueue->connecting_keys[pos];
+                events[count].key = key;
 
                 /* See whether connect has succeeded. */
-                WSAEnumNetworkEvents((pj_sock_t)events[count].key->hnd, 
+                WSAEnumNetworkEvents((pj_sock_t)key->hnd,
                                      ioqueue->connecting_handles[pos], 
                                      &net_events);
                 events[count].status = 
@@ -351,6 +354,18 @@ static int check_connecting( pj_ioqueue_t *ioqueue )
 
                 /* Erase socket from pending connect. */
                 erase_connecting_socket(ioqueue, pos);
+                key->connecting = 0;
+
+                /* Add reference to the key to prevent it from being
+                 * destroyed by a concurrent pj_ioqueue_unregister() while
+                 * the callback below is invoked outside the ioqueue lock.
+                 * Keep the group lock in a local variable, since the key
+                 * may be recycled once we release our reference.
+                 */
+                events[count].grp_lock = key->grp_lock;
+                if (events[count].grp_lock)
+                    pj_grp_lock_add_ref_dbg(events[count].grp_lock,
+                                            "ioqueue", 0);
             } else {
                 /* No more events */
                 break;
@@ -360,17 +375,24 @@ static int check_connecting( pj_ioqueue_t *ioqueue )
 
         /* Call callbacks. */
         for (i=0; i<count; ++i) {
-            if (events[i].key->cb.on_connect_complete) {
-                events[i].key->cb.on_connect_complete(events[i].key, 
-                                                      events[i].status);
+            pj_ioqueue_key_t *key = events[i].key;
+
+            /* The key may have been unregistered after we released the
+             * ioqueue lock, in which case the callback must not be called.
+             */
+            if (!key->closing && key->cb.on_connect_complete) {
+                key->cb.on_connect_complete(key, events[i].status);
             }
+
+            if (events[i].grp_lock)
+                pj_grp_lock_dec_ref_dbg(events[i].grp_lock, "ioqueue", 0);
         }
 
         return count;
     }
 
     return 0;
-    
+
 }
 #endif
 

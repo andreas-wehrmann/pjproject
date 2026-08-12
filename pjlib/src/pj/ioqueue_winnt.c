@@ -827,21 +827,37 @@ static void decrement_counter(pj_ioqueue_key_t *key)
 static struct pending_op *alloc_pending_op(pj_ioqueue_key_t *key,
                                            pj_ioqueue_op_key_t *op_key,
                                            void *buf,
-                                           pj_ssize_t len)
+                                           pj_ssize_t len,
+                                           pj_ioqueue_operation_e op_type,
+                                           pj_status_t *p_status)
 {
     struct pending_op *op = NULL;
     int ref_cnt;
 
-    pj_assert(key && op_key);
+    pj_assert(key && op_key && p_status);
 
     /* Get pending op from free op list, or create a new one if none */
     pj_ioqueue_lock_key(key);
     ref_cnt = pj_grp_lock_get_ref(key->grp_lock);
 
+    /* Reject the operation if this op key is still busy with a previous
+     * operation, otherwise the back-link installed below would be
+     * overwritten and the previous pending op would be orphaned (it would
+     * keep its reference to the key until its completion arrives), and
+     * pj_ioqueue_is_pending() would report a stale state. The select and
+     * epoll backends reject such reuse with PJ_EBUSY as well.
+     */
+    if (OPKEY_OPERATION(op_key) != 0) {
+        pj_ioqueue_unlock_key(key);
+        *p_status = PJ_EBUSY;
+        return NULL;
+    }
+
     if (pj_list_empty(&key->free_pending_list)) {
         op = PJ_POOL_ZALLOC_T(key->pool, struct pending_op);
         if (!op) {
             pj_ioqueue_unlock_key(key);
+            *p_status = PJ_ENOMEM;
             return NULL;
         }
         pj_list_init(op);
@@ -851,18 +867,24 @@ static struct pending_op *alloc_pending_op(pj_ioqueue_key_t *key,
     }
     pj_list_push_back(&key->pending_list, op);
     increment_counter(key);
-    pj_ioqueue_unlock_key(key);
 
     /* Init the pending op */
     op->app_op_key = op_key;
     op->pending_key.overlapped.wsabuf.buf = (CHAR*)buf;
     op->pending_key.overlapped.wsabuf.len = (ULONG)len;
 
-    /* Link app op key to pending-op */
+    /* Link app op key to pending-op and claim the op key, both while
+     * holding the lock and together with the busy check above, so that
+     * concurrent operations on the same op key cannot clobber each other.
+     */
     op_key->internal__[PENDING_OP_POS(op_key)] = op;
+    OPKEY_OPERATION(op_key) = op_type;
+
+    pj_ioqueue_unlock_key(key);
 
     TRACE((THIS_FILE, "ALLOC   op key %p (cnt=%d) op %p", key, ref_cnt-1, op));
 
+    *p_status = PJ_SUCCESS;
     return op;
 }
 
@@ -1592,6 +1614,7 @@ PJ_DEF(pj_status_t) pj_ioqueue_recv(  pj_ioqueue_key_t *key,
     DWORD dwFlags = 0;
     union operation_key *op_key_rec;
     struct pending_op *op;
+    pj_status_t status;
 
     PJ_CHECK_STACK();
     PJ_ASSERT_RETURN(key && op_key && buffer && length, PJ_EINVAL);
@@ -1624,9 +1647,10 @@ PJ_DEF(pj_status_t) pj_ioqueue_recv(  pj_ioqueue_key_t *key,
         }
     }
 
-    op = alloc_pending_op(key, op_key, buffer, *length);
+    op = alloc_pending_op(key, op_key, buffer, *length,
+                          PJ_IOQUEUE_OP_RECV, &status);
     if (!op)
-        return PJ_ENOMEM;
+        return status;
 
     op_key_rec = &op->pending_key;
 
@@ -1639,7 +1663,6 @@ PJ_DEF(pj_status_t) pj_ioqueue_recv(  pj_ioqueue_key_t *key,
     pj_bzero( &op_key_rec->overlapped.overlapped, 
               sizeof(op_key_rec->overlapped.overlapped));
     op_key_rec->overlapped.operation = PJ_IOQUEUE_OP_RECV;
-    OPKEY_OPERATION(op_key) = PJ_IOQUEUE_OP_RECV;
 
     rc = WSARecv((SOCKET)key->hnd, &op_key_rec->overlapped.wsabuf, 1, 
                   &bytesRead, &dwFlags, 
@@ -1648,6 +1671,7 @@ PJ_DEF(pj_status_t) pj_ioqueue_recv(  pj_ioqueue_key_t *key,
         DWORD dwStatus = WSAGetLastError();
         if (dwStatus!=WSA_IO_PENDING) {
             *length = -1;
+            OPKEY_OPERATION(op_key) = 0;
             release_pending_op(key, op);
             return PJ_STATUS_FROM_OS(dwStatus);
         }
@@ -1675,6 +1699,7 @@ PJ_DEF(pj_status_t) pj_ioqueue_recvfrom( pj_ioqueue_key_t *key,
     DWORD dwFlags = 0;
     union operation_key *op_key_rec;
     struct pending_op *op;
+    pj_status_t status;
 
     PJ_CHECK_STACK();
     PJ_ASSERT_RETURN(key && op_key && buffer, PJ_EINVAL);
@@ -1707,9 +1732,10 @@ PJ_DEF(pj_status_t) pj_ioqueue_recvfrom( pj_ioqueue_key_t *key,
         }
     }
 
-    op = alloc_pending_op(key, op_key, buffer, *length);
+    op = alloc_pending_op(key, op_key, buffer, *length,
+                          PJ_IOQUEUE_OP_RECV, &status);
     if (!op)
-        return PJ_ENOMEM;
+        return status;
 
     op_key_rec = &op->pending_key;
 
@@ -1722,7 +1748,6 @@ PJ_DEF(pj_status_t) pj_ioqueue_recvfrom( pj_ioqueue_key_t *key,
     pj_bzero( &op_key_rec->overlapped.overlapped, 
               sizeof(op_key_rec->overlapped.overlapped));
     op_key_rec->overlapped.operation = PJ_IOQUEUE_OP_RECV;
-    OPKEY_OPERATION(op_key) = PJ_IOQUEUE_OP_RECV;
 
     rc = WSARecvFrom((SOCKET)key->hnd, &op_key_rec->overlapped.wsabuf, 1, 
                      &bytesRead, &dwFlags, addr, addrlen,
@@ -1731,6 +1756,7 @@ PJ_DEF(pj_status_t) pj_ioqueue_recvfrom( pj_ioqueue_key_t *key,
         DWORD dwStatus = WSAGetLastError();
         if (dwStatus!=WSA_IO_PENDING) {
             *length = -1;
+            OPKEY_OPERATION(op_key) = 0;
             release_pending_op(key, op);
             return PJ_STATUS_FROM_OS(dwStatus);
         }
@@ -1773,6 +1799,7 @@ PJ_DEF(pj_status_t) pj_ioqueue_sendto( pj_ioqueue_key_t *key,
     DWORD dwFlags;
     union operation_key *op_key_rec;
     struct pending_op *op;
+    pj_status_t status;
 
     PJ_CHECK_STACK();
     PJ_ASSERT_RETURN(key && op_key && data, PJ_EINVAL);
@@ -1807,9 +1834,10 @@ PJ_DEF(pj_status_t) pj_ioqueue_sendto( pj_ioqueue_key_t *key,
         }
     }
 
-    op = alloc_pending_op(key, op_key, (void *)data, *length);
+    op = alloc_pending_op(key, op_key, (void *)data, *length,
+                          PJ_IOQUEUE_OP_SEND, &status);
     if (!op)
-        return PJ_ENOMEM;
+        return status;
 
     op_key_rec = &op->pending_key;
 
@@ -1822,7 +1850,6 @@ PJ_DEF(pj_status_t) pj_ioqueue_sendto( pj_ioqueue_key_t *key,
     pj_bzero( &op_key_rec->overlapped.overlapped, 
               sizeof(op_key_rec->overlapped.overlapped));
     op_key_rec->overlapped.operation = PJ_IOQUEUE_OP_SEND;
-    OPKEY_OPERATION(op_key) = PJ_IOQUEUE_OP_SEND;
 
     rc = WSASendTo((SOCKET)key->hnd, &op_key_rec->overlapped.wsabuf, 1,
                    &bytesWritten,  dwFlags, addr, addrlen,
@@ -1830,6 +1857,7 @@ PJ_DEF(pj_status_t) pj_ioqueue_sendto( pj_ioqueue_key_t *key,
     if (rc == SOCKET_ERROR) {
         DWORD dwStatus = WSAGetLastError();
         if (dwStatus!=WSA_IO_PENDING) {
+            OPKEY_OPERATION(op_key) = 0;
             release_pending_op(key, op);
             return PJ_STATUS_FROM_OS(dwStatus);
         }
@@ -1907,20 +1935,21 @@ PJ_DEF(pj_status_t) pj_ioqueue_accept( pj_ioqueue_key_t *key,
      * No connection is immediately available.
      * Must schedule an asynchronous operation.
      */
-    op = alloc_pending_op(key, op_key, NULL, 0);
+    op = alloc_pending_op(key, op_key, NULL, 0,
+                          PJ_IOQUEUE_OP_ACCEPT, &status);
     if (!op)
-        return PJ_ENOMEM;
+        return status;
 
     op_key_rec = &op->pending_key;
 
     status = pj_sock_socket(pj_AF_INET(), pj_SOCK_STREAM(), 0, 
                             &op_key_rec->accept.newsock);
     if (status != PJ_SUCCESS) {
+        OPKEY_OPERATION(op_key) = 0;
         release_pending_op(key, op);
         return status;
     }
 
-    OPKEY_OPERATION(op_key) = PJ_IOQUEUE_OP_ACCEPT;
     op_key_rec->accept.operation = PJ_IOQUEUE_OP_ACCEPT;
     op_key_rec->accept.addrlen = addrlen;
     op_key_rec->accept.local = local;
@@ -1937,11 +1966,13 @@ PJ_DEF(pj_status_t) pj_ioqueue_accept( pj_ioqueue_key_t *key,
 
     if (rc == TRUE) {
         ioqueue_on_accept_complete(key, &op_key_rec->accept);
+        OPKEY_OPERATION(op_key) = 0;
         release_pending_op(key, op);
         return PJ_SUCCESS;
     } else {
         DWORD dwStatus = WSAGetLastError();
         if (dwStatus!=WSA_IO_PENDING) {
+            OPKEY_OPERATION(op_key) = 0;
             release_pending_op(key, op);
             return PJ_STATUS_FROM_OS(dwStatus);
         }

@@ -1925,7 +1925,8 @@ on_return:
 /* Test: mid-dialog requests with an unrecognized content-type must be
  * rejected. Pre-PR pjsip rejected them via inv_check_sdp_in_incoming_msg()
  * (488 for UPDATE, 415 for re-INVITE when PJSIP_INV_ACCEPT_UNKNOWN_BODY is
- * disabled); this must still hold even when SIPREC is enabled.
+ * disabled); this must still hold even when SIPREC is enabled. With
+ * PJSIP_INV_ACCEPT_UNKNOWN_BODY enabled, the UPDATE is accepted with 200.
  */
 static int test_siprec_unknown_body_rejected(void)
 {
@@ -1968,7 +1969,9 @@ static int test_siprec_unknown_body_rejected(void)
         return -1901;
     }
 
-    /* Phase 1: UPDATE with unknown content-type must be rejected with 488 */
+    /* Phase 1: UPDATE with unknown content-type must be rejected with 488,
+     * or accepted with 200 if PJSIP_INV_ACCEPT_UNKNOWN_BODY is enabled.
+     */
     pjsua_call_setting_default(&opt);
     opt.aud_cnt = 1;
     opt.vid_cnt = 0;
@@ -2006,14 +2009,18 @@ static int test_siprec_unknown_body_rejected(void)
     if (status == PJ_SUCCESS &&
         wait_until(&siprec_response_seen, PJSUA_INVALID_ID, 8000))
     {
-        if (g_siprec_test_ctx.response_code != 488) {
+        const int expected = PJSIP_INV_ACCEPT_UNKNOWN_BODY ?
+                             PJSIP_SC_OK : PJSIP_SC_NOT_ACCEPTABLE_HERE;
+
+        if (g_siprec_test_ctx.response_code != expected) {
             PJ_LOG(1, (THIS_FILE,
-                       "    bogus UPDATE expected 488, got %d",
-                       g_siprec_test_ctx.response_code));
+                       "    bogus UPDATE expected %d, got %d",
+                       expected, g_siprec_test_ctx.response_code));
             rc = -1905;
         } else {
             PJ_LOG(3,(THIS_FILE,
-                      "    bogus UPDATE rejected with 488 as expected"));
+                      "    bogus UPDATE answered with %d as expected",
+                      expected));
         }
     } else {
         PJ_LOG(1, (THIS_FILE, "    no response to bogus UPDATE"));

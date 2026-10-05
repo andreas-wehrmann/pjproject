@@ -1658,11 +1658,17 @@ PJ_INLINE(pjsip_cfg_t*) pjsip_cfg(void)
 #endif
 
 /** 
- * Specify whether to accept INVITE/re-INVITE with unknown content type,
- * by default the stack will reject this type of message as specified in 
- * RFC3261 section 8.2.3.
- * Application that wishes to process the body could set this to PJ_TRUE,
- * be informed that SDP offer/answer will still be present.
+ * Specify whether to accept INVITE/re-INVITE/UPDATE with unknown content
+ * type, i.e. with a message body that has no "application/sdp" part.
+ * By default the stack rejects such a message: INVITE/re-INVITE with 415
+ * as specified in RFC3261 section 8.2.3, and UPDATE with 488.
+ *
+ * Application that wishes to process the body could set this to PJ_TRUE.
+ * Such a message is then handled as a message without SDP offer, so be
+ * informed that SDP offer/answer still takes place where required:
+ * - an INVITE/re-INVITE is answered with an SDP offer in the response,
+ * - an UPDATE is answered with 200/OK without SDP, just like an UPDATE
+ *   without body.
  *
  * Default: PJ_FALSE
  */

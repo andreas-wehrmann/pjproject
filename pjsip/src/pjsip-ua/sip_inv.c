@@ -4471,6 +4471,21 @@ static void inv_respond_incoming_update(pjsip_inv_session *inv,
         status = pjsip_dlg_create_response(inv->dlg, rdata,
                                            200, NULL, &tdata);
     }
+    /* Likewise if the body has no SDP part and the application wants to
+     * process unknown bodies (PJSIP_INV_ACCEPT_UNKNOWN_BODY). Without an
+     * offer, the 491/500 offer/answer collision rules of RFC 3311 section
+     * 5.2 don't apply. Recording sessions are handled below, as the body
+     * may carry SIPREC metadata.
+     */
+    else if (PJSIP_INV_ACCEPT_UNKNOWN_BODY &&
+#if PJSIP_HAS_SIPREC
+             !(inv->options & PJSIP_INV_REQUIRE_SIPREC) &&
+#endif
+             pjsip_rdata_get_sdp_info(rdata)->body.ptr == NULL)
+    {
+        status = pjsip_dlg_create_response(inv->dlg, rdata,
+                                           PJSIP_SC_OK, NULL, &tdata);
+    }
     /* Send 491 if we receive UPDATE while we're waiting for an answer */
     else if (neg_state == PJMEDIA_SDP_NEG_STATE_LOCAL_OFFER) {
         status = pjsip_dlg_create_response(inv->dlg, rdata,
@@ -4582,12 +4597,16 @@ static void inv_respond_incoming_update(pjsip_inv_session *inv,
                     }
                 }
             } else {
-                /* Body exists but has no SDP content-type. On recording
-                 * sessions, accept it as a metadata-only UPDATE (RFC 7866
-                 * §7.1), with metadata already processed above, or reject
-                 * unknown content-types with 488 like upstream does for
-                 * bodies it cannot handle.
+                /* Body exists but has no SDP content-type, so the UPDATE
+                 * carries no offer. On recording sessions, accept it as a
+                 * metadata-only UPDATE (RFC 7866 §7.1), with metadata
+                 * already processed above. Otherwise reject it with 488,
+                 * unless PJSIP_INV_ACCEPT_UNKNOWN_BODY is enabled (only
+                 * reached here on recording sessions, see above).
                  */
+                int st = PJSIP_INV_ACCEPT_UNKNOWN_BODY ?
+                         PJSIP_SC_OK : PJSIP_SC_NOT_ACCEPTABLE_HERE;
+
 #if PJSIP_HAS_SIPREC
                 if ((inv->options & PJSIP_INV_REQUIRE_SIPREC) &&
                     inv_body_has_siprec_metadata(rdata->msg_info.msg->body))
@@ -4597,19 +4616,11 @@ static void inv_respond_incoming_update(pjsip_inv_session *inv,
                     /* The negotiator is done here and the provisional pool
                      * only holds the metadata copy, so it can be reused. */
                     pj_pool_reset(inv->pool_prov);
-                    status = pjsip_dlg_create_response(inv->dlg, rdata,
-                                                       PJSIP_SC_OK, NULL,
-                                                       &tdata);
-                } else {
-                    status = pjsip_dlg_create_response(inv->dlg, rdata,
-                                            PJSIP_SC_NOT_ACCEPTABLE_HERE,
-                                            NULL, &tdata);
+                    st = PJSIP_SC_OK;
                 }
-#else
-                status = pjsip_dlg_create_response(inv->dlg, rdata,
-                                        PJSIP_SC_NOT_ACCEPTABLE_HERE,
-                                        NULL, &tdata);
 #endif
+                status = pjsip_dlg_create_response(inv->dlg, rdata, st,
+                                                   NULL, &tdata);
             }
         } else {
             /* No body - this is a session-timer refresh or similar.

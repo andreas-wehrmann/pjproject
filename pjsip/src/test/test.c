@@ -474,6 +474,13 @@ int test_main(int argc, char *argv[])
     UT_ADD_TEST(&test_app.ut_app, transport_tcp_test, 0);
     UT_ADD_TEST(&test_app.ut_app, transport_tcp_keep_alive_test, 0);
     UT_ADD_TEST(&test_app.ut_app, transport_rx_overflow_test, 0);
+#if PJ_HAS_THREADS
+    /* Exclusive, as any thread polling the endpoint may wait for the
+     * transport manager's lock that this test holds.
+     */
+    UT_ADD_TEST(&test_app.ut_app, transport_tcp_shutdown_test,
+                PJ_TEST_EXCLUSIVE);
+#endif
 #endif
 
     /* Note: put exclusive tests last */

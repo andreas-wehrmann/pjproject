@@ -1186,11 +1186,13 @@ static void transport_idle_callback(pj_timer_heap_t *timer_heap,
     entry->id = PJ_FALSE;
 
     /* Set is_destroying flag under transport manager mutex to avoid
-     * race condition with pjsip_tpmgr_acquire_transport2().
+     * race condition with pjsip_tpmgr_acquire_transport2(), and with
+     * another expiry of this timer, which can be scheduled again while
+     * this callback is running.
      */
     pj_lock_acquire(tp->tpmgr->lock);
 
-    if (pj_atomic_get(tp->ref_cnt) == 0) {
+    if (pj_atomic_get(tp->ref_cnt) == 0 && !tp->is_destroying) {
         tp->is_destroying = PJ_TRUE;
         PJ_LOG(4, (THIS_FILE, "Transport %s is being destroyed "
                   "due to timeout in %s timer", tp->obj_name, 

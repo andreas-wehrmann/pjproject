@@ -335,6 +335,155 @@ static void tp_destroyed(void *arg)
     pj_atomic_inc((pj_atomic_t*)arg);
 }
 
+#if PJ_HAS_THREADS
+struct shutdown_test
+{
+    pj_atomic_t *destroy_cnt;   /* PJSIP_TP_STATE_DESTROY notifications */
+    pj_atomic_t *destroyed;     /* The transport has been released */
+    volatile pj_bool_t quit;
+};
+
+static int shutdown_test_thread(void *arg)
+{
+    struct shutdown_test *t = (struct shutdown_test*)arg;
+    pj_time_val delay = { 0, 10 };
+
+    while (!t->quit)
+        pjsip_endpt_handle_events(endpt, &delay);
+
+    return 0;
+}
+
+static void shutdown_test_cb(pjsip_transport *tp,
+                             pjsip_transport_state state,
+                             const pjsip_transport_state_info *info)
+{
+    struct shutdown_test *t = (struct shutdown_test*)info->user_data;
+    unsigned i;
+
+    if (state == PJSIP_TP_STATE_DISCONNECTED) {
+        /* The last reference, this starts the idle timer */
+        pjsip_transport_dec_ref(tp);
+    } else if (state == PJSIP_TP_STATE_DESTROY) {
+        pj_atomic_inc(t->destroy_cnt);
+    } else {
+        return;
+    }
+
+    /* Let another thread start to process the idle timer, its callback
+     * clears the id first.
+     */
+    for (i = 0; i < 200 && tp->idle_timer.id != PJ_FALSE; ++i)
+        pj_thread_sleep(10);
+    if (i == 200) {
+        PJ_LOG(3,(THIS_FILE, "   note: idle timer not processed in time, "
+                             "the test is not effective"));
+    }
+}
+
+/*
+ * A transport whose last reference is released in the state notification
+ * of pjsip_transport_shutdown2() has its idle timer scheduled there, and
+ * again by pjsip_transport_shutdown2() if another thread is already
+ * processing the first one. The transport must still be destroyed once.
+ */
+int transport_tcp_shutdown_test(void)
+{
+    pjsip_tpfactory *tpfactory = NULL;
+    pjsip_transport *tcp = NULL;
+    pjsip_tp_state_listener_key *key;
+    pj_sockaddr_in rem_addr;
+    pj_str_t localhost = pj_str("127.0.0.1");
+    pjsip_tpselector tp_sel;
+    struct shutdown_test *t;
+    pj_thread_t *thread;
+    pj_pool_t *pool;
+    pj_status_t status;
+    unsigned i;
+    int ret = 0;
+
+    /* On failure the pool is kept, a late destroy may still use it */
+    pool = pjsip_endpt_create_pool(endpt, "tcptest", 512, 512);
+    if (!pool)
+        return -130;
+    t = PJ_POOL_ZALLOC_T(pool, struct shutdown_test);
+    if (pj_atomic_create(pool, 0, &t->destroy_cnt) != PJ_SUCCESS ||
+        pj_atomic_create(pool, 0, &t->destroyed) != PJ_SUCCESS)
+    {
+        return -130;
+    }
+
+    status = pjsip_tcp_transport_start(endpt, NULL, 1, &tpfactory);
+    if (status != PJ_SUCCESS) {
+        app_perror("   Error: unable to start TCP transport", status);
+        return -131;
+    }
+
+    pj_bzero(&tp_sel, sizeof(tp_sel));
+    tp_sel.type = PJSIP_TPSELECTOR_LISTENER;
+    tp_sel.u.listener = tpfactory;
+    pj_sockaddr_in_init(&rem_addr, &localhost,
+                        (pj_uint16_t)tpfactory->addr_name.port);
+    status = pjsip_endpt_acquire_transport(endpt, PJSIP_TRANSPORT_TCP,
+                                           &rem_addr, sizeof(rem_addr),
+                                           &tp_sel, &tcp);
+    if (status != PJ_SUCCESS || tcp == NULL) {
+        app_perror("   Error: unable to acquire TCP transport", status);
+        (*tpfactory->destroy)(tpfactory);
+        return -132;
+    }
+
+    /* Let the connection be established before it is shut down */
+    flush_events(500);
+
+    pj_grp_lock_add_handler(tcp->grp_lock, pool, t->destroyed, &tp_destroyed);
+    status = pjsip_transport_add_state_listener(tcp, &shutdown_test_cb, t,
+                                                &key);
+    if (status == PJ_SUCCESS) {
+        status = pj_thread_create(pool, "tcptest", &shutdown_test_thread, t,
+                                  0, 0, &thread);
+        if (status != PJ_SUCCESS)
+            pjsip_transport_remove_state_listener(tcp, key, t);
+    }
+    if (status != PJ_SUCCESS) {
+        app_perror("   Error: unable to set up the shutdown test", status);
+        pjsip_transport_dec_ref(tcp);
+        (*tpfactory->destroy)(tpfactory);
+        return -133;
+    }
+
+    /* The listener releases the reference */
+    pjsip_transport_shutdown2(tcp, PJ_TRUE);
+
+    for (i = 0; i < 50 && pj_atomic_get(t->destroyed) == 0; ++i)
+        flush_events(100);
+
+    t->quit = PJ_TRUE;
+    pj_thread_join(thread);
+    pj_thread_destroy(thread);
+
+    if (pj_atomic_get(t->destroyed) != 1 ||
+        pj_atomic_get(t->destroy_cnt) != 1)
+    {
+        PJ_LOG(3,(THIS_FILE, "   Error: transport released %d time(s) after "
+                             "%d destroy notification(s)",
+                             (int)pj_atomic_get(t->destroyed),
+                             (int)pj_atomic_get(t->destroy_cnt)));
+        ret = -134;
+    }
+
+    (*tpfactory->destroy)(tpfactory);
+    flush_events(500);
+
+    if (ret == 0) {
+        pj_atomic_destroy(t->destroy_cnt);
+        pj_atomic_destroy(t->destroyed);
+        pj_pool_release(pool);
+    }
+    return ret;
+}
+#endif  /* PJ_HAS_THREADS */
+
 int transport_tcp_test(void)
 {
     enum { SEND_RECV_LOOP = 8 };

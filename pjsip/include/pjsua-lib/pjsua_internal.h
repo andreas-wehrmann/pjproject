@@ -361,6 +361,8 @@ typedef struct pjsua_acc
         pj_timer_entry   timer;     /**< Timer for reregistration.      */
         void            *reg_tp;    /**< Transport for registration.    */
         unsigned         attempt_cnt; /**< Attempt counter.             */
+        pj_bool_t        contact_stale; /**< Contact may be of a transport
+                                             that got disconnected.     */
     } auto_rereg;                   /**< Reregister/reconnect data.     */
 
     pj_timer_entry   ka_timer;      /**< Keep-alive timer for UDP.      */

@@ -33,6 +33,7 @@ enum
 
 static int get_ip_addr_ver(const pj_str_t *host);
 static void schedule_reregistration(pjsua_acc *acc);
+static pj_status_t renew_contact(pjsua_acc *acc, pj_bool_t *changed);
 static pj_status_t acc_set_registration(pjsua_acc_id acc_id, pj_bool_t renew,
                                         pj_bool_t release_all,
                                         pj_bool_t by_app);
@@ -318,6 +319,7 @@ static void clear_regc(pjsua_acc *acc)
 {
     acc->regc = NULL;
     acc->contact.slen = 0;
+    acc->auto_rereg.contact_stale = PJ_FALSE;
     acc->reg_mapped_addr.slen = 0;
     acc->rfc5626_status = OUTBOUND_UNKNOWN;
     acc->rfc5626_flowtmr = 0;
@@ -2580,6 +2582,7 @@ static pj_bool_t acc_check_nat_addr(pjsua_acc *acc,
 
     if (matched) {
         /* Address doesn't change */
+        acc->auto_rereg.contact_stale = PJ_FALSE;
         pj_pool_release(pool);
         return PJ_FALSE;
     }
@@ -2739,6 +2742,7 @@ static pj_bool_t acc_check_nat_addr(pjsua_acc *acc,
             pj_pool_release(pool);
             return PJ_FALSE;
         }
+        acc->auto_rereg.contact_stale = PJ_FALSE;
 
         /* Always update, by https://github.com/pjsip/pjproject/issues/864. */
         /* Since the Via address will now be overwritten to the correct
@@ -3325,6 +3329,42 @@ static void regc_cb(struct pjsip_regc_cbparam *param)
                 PJSUA_UNLOCK();
                 pj_log_pop_indent();
                 return;
+            }
+
+            /* Registered over a new connection before the retry could
+             * renew the Contact, e.g. by a refresh, the application or an
+             * IP change. Not with SIP outbound, where the Contact is not
+             * what the server sends to.
+             */
+            if (acc->auto_rereg.contact_stale && !acc->app_unreg &&
+                acc->rfc5626_status != OUTBOUND_ACTIVE)
+            {
+                pj_bool_t changed = PJ_FALSE;
+                pj_status_t status;
+
+                status = renew_contact(acc, &changed);
+
+                if (changed) {
+                    pjsip_regc *regc = acc->regc;
+
+                    if (status == PJ_SUCCESS) {
+                        status = acc_set_registration(acc->index, PJ_TRUE,
+                                                      PJ_FALSE, PJ_FALSE);
+                    }
+                    /* Not reported back, e.g. failed before sending */
+                    if (status != PJ_SUCCESS && regc == acc->regc)
+                        schedule_reregistration(acc);
+                }
+
+                /* Not reported: the registration of the new Contact has
+                 * its own result, or a failed unregistration has ended
+                 * this one.
+                 */
+                if (changed || param->regc != acc->regc) {
+                    PJSUA_UNLOCK();
+                    pj_log_pop_indent();
+                    return;
+                }
             }
 
             /* Check and update Service-Route header */
@@ -5521,6 +5561,86 @@ PJ_DEF(pj_status_t) pjsua_acc_set_affinity_addr(pjsua_acc_id acc_id,
 }
 
 
+/* Regenerate the Contact for the transport now in use and load it into the
+ * regc. *changed is set when the caller has to register it.
+ */
+static pj_status_t renew_contact(pjsua_acc *acc, pj_bool_t *changed)
+{
+    pj_str_t tmp_contact;
+    pj_pool_t *pool;
+    pj_status_t status;
+
+    pool = pjsua_pool_create("tmpregc", 512, 512);
+
+    status = pjsua_acc_create_uac_contact(pool, &tmp_contact, acc->index,
+                                          &acc->cfg.reg_uri);
+    if (status != PJ_SUCCESS) {
+        pjsua_perror(THIS_FILE,
+                     "Unable to generate suitable Contact header"
+                     " for re-registration", status);
+        pj_pool_release(pool);
+        return status;
+    }
+
+    if (pj_strcmp(&tmp_contact, &acc->contact)) {
+        pj_bool_t need_unreg = ((acc->cfg.contact_rewrite_method &
+                                 PJSUA_CONTACT_REWRITE_UNREGISTER) != 0);
+
+        if (need_unreg && acc->regc) {
+            /* PJSUA_CONTACT_REWRITE_UNREGISTER is set. Mirror the
+             * IP-change response path semantics (see
+             * acc_check_nat_addr()): send an explicit unregister
+             * of the old Contact, then tear down and recreate the
+             * regc so the next REGISTER carries only the new
+             * Contact under a fresh Call-ID. The unregister is
+             * best-effort — the regc is destroyed before the
+             * response arrives. If the old regc still has a
+             * pending transaction (PJSIP_EBUSY), defer rather
+             * than abandon the in-flight tsx and race a second
+             * REGISTER against it.
+             */
+            status = acc_set_registration(acc->index, PJ_FALSE,
+                                          PJ_FALSE, PJ_FALSE);
+            if (status != PJ_SUCCESS) {
+                pjsua_perror(THIS_FILE,
+                             "Unable to send unregister of old"
+                             " Contact; deferring", status);
+                pj_pool_release(pool);
+                return status;
+            }
+            /* The application may delete the account in a callback */
+            if (!acc->valid) {
+                pj_pool_release(pool);
+                return PJ_EINVALIDOP;
+            }
+            destroy_regc(acc, PJ_TRUE);
+            update_keep_alive(acc, PJ_FALSE, NULL);
+            if (changed)
+                *changed = PJ_TRUE;
+            status = pjsua_regc_init(acc->index);
+            if (status != PJ_SUCCESS) {
+                pjsua_perror(THIS_FILE,
+                             "Unable to reinit client registration"
+                             " for re-registration", status);
+                pj_pool_release(pool);
+                return status;
+            }
+        } else {
+            /* Refused: the regc keeps the old Contact, which stays stale */
+            if (!update_regc_contact(acc, &tmp_contact, PJ_TRUE)) {
+                pj_pool_release(pool);
+                return PJ_SUCCESS;
+            }
+            if (changed)
+                *changed = PJ_TRUE;
+        }
+    }
+    pj_pool_release(pool);
+
+    acc->auto_rereg.contact_stale = PJ_FALSE;
+    return PJ_SUCCESS;
+}
+
 /* Auto re-registration timeout callback */
 static void auto_rereg_timer_cb(pj_timer_heap_t *th, pj_timer_entry *te)
 {
@@ -5552,66 +5672,11 @@ static void auto_rereg_timer_cb(pj_timer_heap_t *th, pj_timer_entry *te)
      * contact the UA).
      */
     if (acc->rfc5626_status != OUTBOUND_ACTIVE && !acc->contact_rewritten) {
-        pj_str_t tmp_contact;
-        pj_pool_t *pool;
-
-        pool = pjsua_pool_create("tmpregc", 512, 512);
-
-        status = pjsua_acc_create_uac_contact(pool, &tmp_contact, acc->index,
-                                              &acc->cfg.reg_uri);
+        status = renew_contact(acc, NULL);
         if (status != PJ_SUCCESS) {
-            pjsua_perror(THIS_FILE,
-                         "Unable to generate suitable Contact header"
-                         " for re-registration", status);
-            pj_pool_release(pool);
             schedule_reregistration(acc);
             goto on_return;
         }
-
-        if (pj_strcmp(&tmp_contact, &acc->contact)) {
-            pj_bool_t need_unreg = ((acc->cfg.contact_rewrite_method &
-                                     PJSUA_CONTACT_REWRITE_UNREGISTER) != 0);
-
-            if (need_unreg && acc->regc) {
-                /* PJSUA_CONTACT_REWRITE_UNREGISTER is set. Mirror the
-                 * IP-change response path semantics (see
-                 * acc_check_nat_addr()): send an explicit unregister
-                 * of the old Contact, then tear down and recreate the
-                 * regc so the next REGISTER carries only the new
-                 * Contact under a fresh Call-ID. The unregister is
-                 * best-effort — the regc is destroyed before the
-                 * response arrives. If the old regc still has a
-                 * pending transaction (PJSIP_EBUSY), defer to the
-                 * next retry rather than abandon the in-flight tsx
-                 * and race a second REGISTER against it.
-                 */
-                status = acc_set_registration(acc->index, PJ_FALSE,
-                                              PJ_FALSE, PJ_FALSE);
-                if (status != PJ_SUCCESS) {
-                    pjsua_perror(THIS_FILE,
-                                 "Unable to send unregister of old"
-                                 " Contact; deferring", status);
-                    pj_pool_release(pool);
-                    schedule_reregistration(acc);
-                    goto on_return;
-                }
-                destroy_regc(acc, PJ_TRUE);
-                update_keep_alive(acc, PJ_FALSE, NULL);
-                status = pjsua_regc_init(acc->index);
-                if (status != PJ_SUCCESS) {
-                    pjsua_perror(THIS_FILE,
-                                 "Unable to reinit client registration"
-                                 " for re-registration", status);
-                    pj_pool_release(pool);
-                    schedule_reregistration(acc);
-                    goto on_return;
-                }
-            } else {
-                /* On refusal, re-register with the Contact the regc kept */
-                update_regc_contact(acc, &tmp_contact, PJ_TRUE);
-            }
-        }
-        pj_pool_release(pool);
     }
 
     /* Drop auto-captured affinity pin before retrying — if the pinned
@@ -5786,9 +5851,11 @@ void pjsua_acc_on_tp_state_changed(pjsip_transport *tp,
             pjsip_regc_release_transport(pjsua_var.acc[i].regc);
 
             /* Reset contact rewrite flag so that re-registration will
-             * generate a new Contact based on the new transport.
+             * generate a new Contact based on the new transport. Until
+             * then the Contact is stale, see regc_cb().
              */
             acc->contact_rewritten = PJ_FALSE;
+            acc->auto_rereg.contact_stale = PJ_TRUE;
             if (acc->rfc5626_status == OUTBOUND_ACTIVE) {
                 acc->rfc5626_status = OUTBOUND_WANTED;
             }

@@ -62,6 +62,14 @@
  *      but not into the next REGISTER, which keeps the account proxy.
  *      Also with a server affinity UDP pin, whose hidden Route leads the
  *      account route set.
+ *  15. The Contact of a registration over TCP has the source port of its
+ *      connection. When that connection is lost, the port of the new one
+ *      must end up registered and the old binding removed, whether the
+ *      retry scheduled for the disconnect, an IP change, a refresh or the
+ *      application registers first. Also with
+ *      PJSUA_CONTACT_REWRITE_UNREGISTER, where a failed unregistration
+ *      ends the registration instead, and behind NAT. Not when the
+ *      registrar still sees the Contact or confirms SIP outbound.
  */
 
 #include "test.h"
@@ -97,6 +105,19 @@ static struct {
     char          last_contact[PJSIP_MAX_URL_SIZE];  /* as seen on the wire */
     /* host of the first Contact not sent with expires=0 */
     char          live_host[PJ_INET6_ADDRSTRLEN + 16];
+    /* Of the last request over a connection, for tp_lost_test(): */
+    pj_bool_t     track_conn;   /* enabled */
+    unsigned      conn_cnt;     /* connections that brought requests */
+    int           src_port;     /* its source port */
+    pj_int32_t    cseq;         /* its CSeq */
+    int           live_port;    /* port of the Contact it registers */
+    int           gone_port;    /* port of the last Contact removed */
+    pjsip_transport *tp;        /* its transport, referenced */
+    unsigned      lost_conn;    /* conn_cnt of the connection lost */
+    int           lost_port;    /* Contact port registered over it */
+    unsigned      stale_cnt;    /* registrations of that over another */
+    pj_bool_t     outbound;     /* Require: outbound in a 2xx */
+    int           rport;        /* forced Via rport param, or 0 */
     unsigned      reg_count;    /* requests that add a binding */
     int           code;         /* response code, or 0 for 200 */
     pj_bool_t     code_once;    /* code only for the next request */
@@ -124,6 +145,7 @@ static pj_bool_t mock_registrar_rx_request(pjsip_rx_data *rdata)
     pjsip_msg *msg = rdata->msg_info.msg;
     pjsip_hdr  hdr_list;
     int        code;
+    int        live_port = 0, gone_port = 0;
 
     if (!is_user_equal(rdata->msg_info.from, TEST_USER))
         return PJ_FALSE;
@@ -161,7 +183,9 @@ static pj_bool_t mock_registrar_rx_request(pjsip_rx_data *rdata)
         }
     }
 
-    /* And the host of the first Contact it registers rather than removes */
+    /* And the host of the first Contact it registers rather than removes,
+     * with its port and that of the first Contact it removes
+     */
     {
         pjsip_contact_hdr *hc = NULL;
 
@@ -172,17 +196,54 @@ static pj_bool_t mock_registrar_rx_request(pjsip_rx_data *rdata)
         {
             pjsip_sip_uri *uri;
 
-            if (hc->expires == 0 || hc->uri == NULL ||
+            if (hc->uri == NULL ||
                 !(PJSIP_URI_SCHEME_IS_SIP(hc->uri) ||
                   PJSIP_URI_SCHEME_IS_SIPS(hc->uri)))
             {
                 continue;
             }
             uri = (pjsip_sip_uri*) pjsip_uri_get_uri(hc->uri);
-            pj_ansi_snprintf(g_mock_reg.live_host,
-                             sizeof(g_mock_reg.live_host), "%.*s",
-                             (int)uri->host.slen, uri->host.ptr);
-            break;
+            if (hc->expires == 0) {
+                if (!gone_port)
+                    gone_port = uri->port;
+            } else if (!g_mock_reg.live_host[0]) {
+                pj_ansi_snprintf(g_mock_reg.live_host,
+                                 sizeof(g_mock_reg.live_host), "%.*s",
+                                 (int)uri->host.slen, uri->host.ptr);
+                live_port = uri->port;
+            }
+        }
+    }
+
+    /* Requests of earlier sub-tests may still arrive, over UDP */
+    if (g_mock_reg.track_conn &&
+        PJSIP_TRANSPORT_IS_RELIABLE(rdata->tp_info.transport))
+    {
+        pjsip_expires_hdr *he = (pjsip_expires_hdr*)
+                                pjsip_msg_find_hdr(msg, PJSIP_H_EXPIRES,
+                                                   NULL);
+
+        /* An unregistration removes the Contact it has */
+        if (he && he->ivalue == 0) {
+            gone_port = live_port;
+            live_port = 0;
+        }
+        g_mock_reg.src_port = rdata->pkt_info.src_port;
+        g_mock_reg.cseq = rdata->msg_info.cseq->cseq;
+        g_mock_reg.live_port = live_port;
+        if (gone_port)
+            g_mock_reg.gone_port = gone_port;
+        if (g_mock_reg.tp != rdata->tp_info.transport) {
+            if (g_mock_reg.tp)
+                pjsip_transport_dec_ref(g_mock_reg.tp);
+            g_mock_reg.tp = rdata->tp_info.transport;
+            pjsip_transport_add_ref(g_mock_reg.tp);
+            g_mock_reg.conn_cnt++;
+        }
+        if (live_port && live_port == g_mock_reg.lost_port &&
+            g_mock_reg.conn_cnt != g_mock_reg.lost_conn)
+        {
+            g_mock_reg.stale_cnt++;
         }
     }
 
@@ -224,6 +285,8 @@ static pj_bool_t mock_registrar_rx_request(pjsip_rx_data *rdata)
         pj_strdup2(rdata->tp_info.pool, &rdata->msg_info.via->recvd_param,
                    g_mock_reg.received);
     }
+    if (g_mock_reg.rport)
+        rdata->msg_info.via->rport_param = g_mock_reg.rport;
 
     pj_list_init(&hdr_list);
     if (g_mock_reg.challenge &&
@@ -251,6 +314,14 @@ static pj_bool_t mock_registrar_rx_request(pjsip_rx_data *rdata)
         code = g_mock_reg.code ? g_mock_reg.code : 200;
         if (g_mock_reg.code_once)
             g_mock_reg.code = 0;
+    }
+    if (code / 100 == 2 && g_mock_reg.outbound) {
+        const pj_str_t hname = pj_str("Require");
+        const pj_str_t hvalue = pj_str("outbound");
+
+        pj_list_push_back(&hdr_list,
+                          pjsip_generic_string_hdr_create(
+                              rdata->tp_info.pool, &hname, &hvalue));
     }
     if (code / 100 == 2 && g_mock_reg.service_route) {
         const pj_str_t hname = pj_str("Service-Route");
@@ -1665,6 +1736,302 @@ on_return:
 
 
 /*****************************************************************************
+ * Lost connection
+ *****************************************************************************/
+
+#if PJ_HAS_TCP
+
+/* Who registers first once the connection is lost */
+enum {
+    TPL_RETRY,      /* the retry scheduled for the disconnect */
+    TPL_REFRESH,    /* a refresh */
+    TPL_APP,        /* the application */
+    TPL_IPC         /* the IP change that shuts the connection down */
+};
+
+/* Flags of a case */
+enum {
+    TPL_UNREG       = 1,    /* PJSUA_CONTACT_REWRITE_UNREGISTER */
+    TPL_FAIL_UNREG  = 2,    /* whose unregistration fails in the send */
+    TPL_NAT         = 4,    /* the registrar sees a public address */
+    TPL_SAME_MAP    = 8,    /* and the same port for every connection */
+    TPL_OUTBOUND    = 16    /* the registrar confirms SIP outbound */
+};
+
+/* Port of the account's Contact, or -1 */
+static int get_acc_contact_port(pjsua_acc_id acc_id)
+{
+    const pj_str_t STR_CONTACT = { "Contact", 7 };
+    pjsua_acc *acc = &pjsua_var.acc[acc_id];
+    pjsip_contact_hdr *hdr;
+    pj_pool_t *pool;
+    int port = -1;
+
+    pool = pjsua_pool_create("acctest", 512, 512);
+    hdr = (pjsip_contact_hdr*)
+          pjsip_parse_hdr(pool, &STR_CONTACT, acc->contact.ptr,
+                          acc->contact.slen, NULL);
+    if (hdr && hdr->uri && PJSIP_URI_SCHEME_IS_SIP(hdr->uri))
+        port = ((pjsip_sip_uri*) pjsip_uri_get_uri(hdr->uri))->port;
+
+    pj_pool_release(pool);
+    return port;
+}
+
+/* The Contact of a registration over TCP has the source port of its
+ * connection. When that connection is lost, the retry scheduled for it
+ * generates a new Contact. A refresh, the application or an IP change may
+ * register first though, over a new connection and still with the old
+ * Contact, which nothing reaches any more: the 2xx must replace it then.
+ * Not when the registrar still sees that Contact, or confirms SIP outbound:
+ * the Contact is left alone there.
+ */
+static int tp_lost_test(int port, int who, unsigned flags, int err_base)
+{
+    static const char *title[] = { "the retry", "a refresh",
+                                   "the application", "the IP change" };
+    /* The cases in which the Contact has to stay as it is */
+    const pj_bool_t  keep = (flags & (TPL_SAME_MAP | TPL_OUTBOUND)) != 0;
+    pjsua_acc_config acc_cfg;
+    pjsua_acc_id     acc_id;
+    pjsua_acc       *acc;
+    pjsip_transport *tp;
+    char             reg_uri[64];
+    pj_time_val      end, now;
+    unsigned         conn_cnt, ok_cnt, stale_cnt;
+    int              old_src, old_port;
+    pj_bool_t        done, has_regc;
+    pj_status_t      status;
+    int              rc = 0;
+
+    PJ_LOG(3, (THIS_FILE, "  pjsua acc: connection lost, %s registers "
+               "first%s%s%s%s%s", title[who],
+               (flags & TPL_UNREG) ? ", UNREGISTER method" : "",
+               (flags & TPL_FAIL_UNREG) ? " failing" : "",
+               (flags & TPL_NAT) ? ", NAT" : "",
+               (flags & TPL_SAME_MAP) ? " keeping its mapping" : "",
+               (flags & TPL_OUTBOUND) ? ", SIP outbound" : ""));
+
+    pj_bzero(&g_ctx, sizeof(g_ctx));
+    g_mock_reg.track_conn = PJ_TRUE;
+    g_mock_reg.conn_cnt = g_mock_reg.lost_conn = 0;
+    g_mock_reg.src_port = g_mock_reg.live_port = g_mock_reg.lost_port = 0;
+    g_mock_reg.outbound = (flags & TPL_OUTBOUND) != 0;
+    g_mock_reg.received = (flags & TPL_NAT) ? "1.2.3.4" : NULL;
+    g_mock_reg.rport = (flags & TPL_SAME_MAP) ? 40000 : 0;
+
+    pj_ansi_snprintf(reg_uri, sizeof(reg_uri),
+                     "sip:127.0.0.1:%d;transport=tcp", port);
+
+    pjsua_acc_config_default(&acc_cfg);
+    acc_cfg.id       = pj_str("sip:" TEST_USER "@pjsip.org");
+    acc_cfg.reg_uri  = pj_str(reg_uri);
+    acc_cfg.register_on_acc_add = PJ_FALSE;
+    acc_cfg.reg_timeout = TEST_EXPIRES;
+    /* Retry at once, or not before the test is over */
+    acc_cfg.reg_retry_interval = 3600;
+    acc_cfg.reg_first_retry_interval = (who == TPL_RETRY) ? 0 : 3600;
+    acc_cfg.reg_retry_random_interval = 0;
+    if (flags & TPL_UNREG)
+        acc_cfg.contact_rewrite_method = PJSUA_CONTACT_REWRITE_UNREGISTER;
+
+    status = pjsua_acc_add(&acc_cfg, PJ_FALSE, &acc_id);
+    if (status != PJ_SUCCESS) {
+        PJ_LOG(3, (THIS_FILE, "    error: pjsua_acc_add failed (%d)", status));
+        g_mock_reg.track_conn = g_mock_reg.outbound = PJ_FALSE;
+        g_mock_reg.received = NULL;
+        g_mock_reg.rport = 0;
+        return err_base - 1;
+    }
+    acc = &pjsua_var.acc[acc_id];
+
+    status = pjsua_acc_set_registration(acc_id, PJ_TRUE);
+    if (status != PJ_SUCCESS || wait_reg(10000) != 0 || !g_mock_reg.tp) {
+        PJ_LOG(3, (THIS_FILE, "    error: registration failed (%d), last "
+                   "code %d", status, g_ctx.reg_code));
+        rc = err_base - 2;
+        goto on_return;
+    }
+
+    old_src = g_mock_reg.src_port;
+    old_port = g_mock_reg.live_port;
+    if (old_port != old_src && !(flags & TPL_SAME_MAP)) {
+        /* contact_use_src_port does not work everywhere */
+        PJ_LOG(3, (THIS_FILE, "    skipped: Contact port %d is not the "
+                   "source port %d", old_port, old_src));
+        goto on_return;
+    }
+
+    conn_cnt = g_mock_reg.conn_cnt;
+    g_mock_reg.lost_conn = conn_cnt;
+    g_mock_reg.lost_port = old_port;
+    g_mock_reg.gone_port = 0;
+    g_mock_reg.stale_cnt = 0;
+    g_ctx.reg_done = PJ_FALSE;
+    ok_cnt = g_ctx.reg_ok_count;
+
+    if (who == TPL_IPC) {
+        /* Shuts the transport down and registers */
+        status = ip_change();
+        pump_events(10000, &g_ctx.ipc_done_cnt, PJ_TRUE);
+        if (status != PJ_SUCCESS || g_ctx.ipc_done_cnt != 1 ||
+            g_ctx.ipc_update_cnt != 1)
+        {
+            PJ_LOG(3, (THIS_FILE, "    error: IP change status %d, %d "
+                       "registration reports, %d completions", status,
+                       g_ctx.ipc_update_cnt, g_ctx.ipc_done_cnt));
+            rc = err_base - 3;
+            goto on_return;
+        }
+    } else {
+        /* Close the registrar's end of the connection */
+        tp = g_mock_reg.tp;
+        g_mock_reg.tp = NULL;
+        pjsip_transport_shutdown(tp);
+        pjsip_transport_dec_ref(tp);
+    }
+
+    status = PJ_SUCCESS;
+    if (who == TPL_REFRESH || who == TPL_APP) {
+        /* The account has noticed once the retry is scheduled */
+        pump_events(5000, &acc->auto_rereg.active, PJ_TRUE);
+        if (!acc->auto_rereg.active) {
+            PJ_LOG(3, (THIS_FILE, "    error: no retry scheduled for the "
+                       "lost connection"));
+            rc = err_base - 3;
+            goto on_return;
+        }
+
+        if (flags & TPL_FAIL_UNREG) {
+            /* The REGISTER goes out, the unregistration after it fails */
+            g_fail_tx.host = "127.0.0.1";
+            g_fail_tx.skip = 1;
+        }
+        if (who == TPL_REFRESH) {
+            /* Brings the refresh forward, to a few seconds from now */
+            status = pjsip_regc_set_delay_before_refresh(acc->regc,
+                                                         TEST_EXPIRES - 1);
+        } else {
+            status = pjsua_acc_set_registration(acc_id, PJ_TRUE);
+        }
+    }
+    if (status != PJ_SUCCESS) {
+        PJ_LOG(3, (THIS_FILE, "    error: unable to register again (%d)",
+                   status));
+        rc = err_base - 4;
+        goto on_return;
+    }
+
+    /* Until the result of the last REGISTER is reported, with the port of
+     * the new connection registered where the Contact has to follow it
+     */
+    pj_gettickcount(&end);
+    end.sec += PJSIP_REGISTER_CLIENT_DELAY_BEFORE_REFRESH + 15;
+    do {
+        pjsua_handle_events(50);
+        if (flags & TPL_FAIL_UNREG) {
+            done = g_ctx.reg_done || g_ctx.reg_code >= 300;
+        } else {
+            done = g_ctx.reg_done && g_mock_reg.conn_cnt != conn_cnt &&
+                   g_ctx.reg_ok_cseq == g_mock_reg.cseq &&
+                   (keep || g_mock_reg.live_port == g_mock_reg.src_port);
+        }
+        pj_gettickcount(&now);
+    } while (!done && PJ_TIME_VAL_LT(now, end));
+
+    if (!done) {
+        PJ_LOG(3, (THIS_FILE, "    error: Contact port %d registered from "
+                   "port %d, the lost connection had port %d, last code %d",
+                   g_mock_reg.live_port, g_mock_reg.src_port, old_src,
+                   g_ctx.reg_code));
+        rc = err_base - 5;
+        goto on_return;
+    }
+
+    if (g_mock_reg.conn_cnt != conn_cnt && g_mock_reg.src_port == old_src) {
+        /* Then the old Contact is as good as a new one */
+        PJ_LOG(3, (THIS_FILE, "    skipped: the new connection has the "
+                   "port of the lost one, %d", old_src));
+        goto on_return;
+    }
+
+    if (flags & TPL_FAIL_UNREG) {
+        /* That failure ended the registration: no success to report */
+        if (g_fail_tx.host != NULL || g_ctx.reg_ok_count != ok_cnt ||
+            acc->regc != NULL)
+        {
+            PJ_LOG(3, (THIS_FILE, "    error: %s", g_fail_tx.host ?
+                       "the old Contact was not unregistered" :
+                       "the registration went on after the unregistration "
+                       "failed"));
+            rc = err_base - 6;
+        }
+        goto on_return;
+    }
+
+    /* It is the Contact of requests outside the registration as well */
+    if (get_acc_contact_port(acc_id) != g_mock_reg.live_port ||
+        (keep && g_mock_reg.live_port != old_port))
+    {
+        PJ_LOG(3, (THIS_FILE, "    error: account Contact '%.*s', "
+                   "registered port %d, port before %d",
+                   (int)acc->contact.slen, acc->contact.ptr,
+                   g_mock_reg.live_port, old_port));
+        rc = err_base - 6;
+        goto on_return;
+    }
+
+    if (!keep && g_mock_reg.gone_port != old_port) {
+        PJ_LOG(3, (THIS_FILE, "    error: the binding of port %d was not "
+                   "removed", old_port));
+        rc = err_base - 7;
+        goto on_return;
+    }
+
+    /* The retry never registers the old Contact over the new connection;
+     * anyone else does it once
+     */
+    stale_cnt = (who == TPL_RETRY) ? 0 : 1;
+    if (g_mock_reg.stale_cnt != stale_cnt) {
+        PJ_LOG(3, (THIS_FILE, "    error: old Contact registered over "
+                   "another connection %u time(s), expected %u",
+                   g_mock_reg.stale_cnt, stale_cnt));
+        rc = err_base - 8;
+        goto on_return;
+    }
+
+    /* The 2xx of a REGISTER with a Contact to replace is not reported */
+    if (g_ctx.reg_ok_count != ok_cnt + 1) {
+        PJ_LOG(3, (THIS_FILE, "    error: %u registrations reported, "
+                   "expected 1", g_ctx.reg_ok_count - ok_cnt));
+        rc = err_base - 9;
+        goto on_return;
+    }
+
+on_return:
+    g_fail_tx.host = NULL;
+    g_fail_tx.skip = 0;
+
+    /* The registrar gets the unregistration before the next case starts */
+    has_regc = (acc->regc != NULL);
+    g_mock_reg.gone_port = 0;
+    pjsua_acc_del(acc_id);
+    if (has_regc)
+        pump_events(2000, &g_mock_reg.gone_port, PJ_TRUE);
+
+    g_mock_reg.track_conn = g_mock_reg.outbound = PJ_FALSE;
+    g_mock_reg.received = NULL;
+    g_mock_reg.rport = 0;
+    if (g_mock_reg.tp) {
+        pjsip_transport_dec_ref(g_mock_reg.tp);
+        g_mock_reg.tp = NULL;
+    }
+    return rc;
+}
+#endif
+
+
+/*****************************************************************************
  * Main entry point
  *****************************************************************************/
 
@@ -1675,6 +2042,10 @@ int pjsua_acc_test(void)
     pjsua_transport_config tp_cfg;
     pjsua_transport_id     tp_id;
     pj_uint16_t            port;
+#if PJ_HAS_TCP
+    pjsua_transport_id     tcp_id;
+    pj_uint16_t            tcp_port;
+#endif
     pj_status_t            status;
     int rc = 0;
 
@@ -1726,6 +2097,16 @@ int pjsua_acc_test(void)
         return -2403;
     }
 
+#if PJ_HAS_TCP
+    /* Only the lost connection sub-test needs it */
+    status = pjsua_transport_create(PJSIP_TRANSPORT_TCP, &tp_cfg, &tcp_id);
+    if (status != PJ_SUCCESS) {
+        PJ_LOG(3, (THIS_FILE, "  no TCP transport (%d), lost connection "
+                   "sub-test skipped", status));
+        tcp_id = PJSUA_INVALID_ID;
+    }
+#endif
+
     status = pjsua_start();
     if (status != PJ_SUCCESS) {
         PJ_LOG(1, (THIS_FILE, "  pjsua_start failed (%d)", status));
@@ -1738,6 +2119,13 @@ int pjsua_acc_test(void)
         pjsua_transport_info ti;
         pjsua_transport_get_info(tp_id, &ti);
         port = pj_sockaddr_get_port(&ti.local_addr);
+#if PJ_HAS_TCP
+        tcp_port = 0;
+        if (tcp_id != PJSUA_INVALID_ID) {
+            pjsua_transport_get_info(tcp_id, &ti);
+            tcp_port = pj_sockaddr_get_port(&ti.local_addr);
+        }
+#endif
     }
 
     status = pjsip_endpt_register_module(pjsua_get_pjsip_endpt(),
@@ -1899,6 +2287,33 @@ int pjsua_acc_test(void)
     if (rc != 0) goto on_return;
     rc = final_window_test(tp_id, (int)port, FINAL_REG_FAIL);
     if (rc != 0) goto on_return;
+#endif
+
+#if PJ_HAS_TCP
+    if (tcp_id != PJSUA_INVALID_ID) {
+        static const struct {
+            int      who;
+            unsigned flags;
+        } cases[] = {
+            { TPL_RETRY, 0 },
+            { TPL_RETRY, TPL_UNREG },
+            { TPL_IPC, 0 },
+            { TPL_REFRESH, 0 },
+            { TPL_APP, 0 },
+            { TPL_APP, TPL_UNREG },
+            { TPL_APP, TPL_UNREG | TPL_FAIL_UNREG },
+            { TPL_APP, TPL_NAT },
+            { TPL_APP, TPL_NAT | TPL_SAME_MAP },
+            { TPL_APP, TPL_OUTBOUND },
+        };
+        unsigned i;
+
+        for (i=0; i<PJ_ARRAY_SIZE(cases); ++i) {
+            rc = tp_lost_test((int)tcp_port, cases[i].who, cases[i].flags,
+                              -5000 - 10 * (int)i);
+            if (rc != 0) goto on_return;
+        }
+    }
 #endif
 
 on_return:

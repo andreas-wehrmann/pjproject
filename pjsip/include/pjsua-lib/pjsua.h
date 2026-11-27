@@ -487,6 +487,11 @@ typedef struct pj_stun_resolve_result pj_stun_resolve_result;
  * This feature is not fully implemented yet. Currently it only signals and
  * verifies siprec capability in Supported & Required headers in INVITE.
  *
+ * When disabled, pjsua_acc_config.use_siprec is ignored. An application
+ * may still announce the "siprec" option tag with
+ * #pjsip_endpt_add_capability(), calls then accept and advertise it like
+ * any other endpoint capability.
+ *
  * Default: 0 (disabled)
  */
 #ifndef PJSUA_HAS_SIPREC

@@ -4898,6 +4898,125 @@ on_return:
 
 #endif
 
+#if !PJSUA_HAS_SIPREC
+/* Without SIPREC support, "siprec" is an ordinary option tag: an INVITE
+ * requiring it must be accepted once the application announces it as a
+ * Supported capability, and the answer must keep it in Supported.
+ */
+static struct {
+    pj_bool_t seen;
+    int       code;
+    pj_bool_t supported;
+} g_siprec_tag;
+
+static pj_bool_t siprec_tag_response_seen(pjsua_call_id call_id)
+{
+    PJ_UNUSED_ARG(call_id);
+    return g_siprec_tag.seen;
+}
+
+static void siprec_tag_request_cb(void *token, pjsip_event *e)
+{
+    const pj_str_t STR_SIPREC = { "siprec", 6 };
+    pjsip_transaction *tsx;
+    pjsip_supported_hdr *sup;
+    unsigned i;
+
+    PJ_UNUSED_ARG(token);
+
+    if (e->type != PJSIP_EVENT_TSX_STATE)
+        return;
+
+    tsx = e->body.tsx_state.tsx;
+    if (!tsx || tsx->status_code < 200 || g_siprec_tag.seen)
+        return;
+
+    g_siprec_tag.code = tsx->status_code;
+    if (e->body.tsx_state.type == PJSIP_EVENT_RX_MSG) {
+        sup = (pjsip_supported_hdr*)
+              pjsip_msg_find_hdr(e->body.tsx_state.src.rdata->msg_info.msg,
+                                 PJSIP_H_SUPPORTED, NULL);
+        for (i = 0; sup && i < sup->count; ++i) {
+            if (pj_stricmp(&sup->values[i], &STR_SIPREC) == 0)
+                g_siprec_tag.supported = PJ_TRUE;
+        }
+    }
+    g_siprec_tag.seen = PJ_TRUE;
+}
+
+static int test_siprec_tag_without_siprec_support(void)
+{
+    static char sdp_str[] =
+        "v=0\r\n"
+        "o=- 1 1 IN IP4 127.0.0.1\r\n"
+        "s=-\r\n"
+        "c=IN IP4 127.0.0.1\r\n"
+        "t=0 0\r\n"
+        "m=audio 4000 RTP/AVP 0\r\n";
+    const pj_str_t STR_SIPREC = { "siprec", 6 };
+    const pj_str_t STR_REQUIRE = { "Require", 7 };
+    pjsip_endpoint *endpt = pjsua_get_pjsip_endpt();
+    pj_str_t target, type, subtype, text;
+    pjsip_contact_hdr *contact;
+    pjsip_tx_data *tdata;
+    pj_status_t status;
+
+    PJ_LOG(3, (THIS_FILE, "  siprec option tag without SIPREC support"));
+
+    status = pjsip_endpt_add_capability(endpt, NULL, PJSIP_H_SUPPORTED, NULL,
+                                        1, &STR_SIPREC);
+    if (status != PJ_SUCCESS)
+        return -9600;
+
+    pj_bzero(&g_siprec_tag, sizeof(g_siprec_tag));
+
+    target = pj_str(g_ctx.self_uri);
+    status = pjsip_endpt_create_request(endpt, &pjsip_invite_method, &target,
+                                        &target, &target, NULL, NULL, -1,
+                                        NULL, &tdata);
+    if (status != PJ_SUCCESS)
+        return -9601;
+
+    pjsip_msg_add_hdr(tdata->msg, (pjsip_hdr*)
+                      pjsip_generic_string_hdr_create(tdata->pool,
+                                                      &STR_REQUIRE,
+                                                      &STR_SIPREC));
+
+    contact = pjsip_contact_hdr_create(tdata->pool);
+    contact->uri = pjsip_parse_uri(tdata->pool, g_ctx.self_uri,
+                                   pj_ansi_strlen(g_ctx.self_uri), 0);
+    pjsip_msg_add_hdr(tdata->msg, (pjsip_hdr*)contact);
+
+    type = pj_str("application");
+    subtype = pj_str("sdp");
+    text = pj_str(sdp_str);
+    tdata->msg->body = pjsip_msg_body_create(tdata->pool, &type, &subtype,
+                                             &text);
+
+    status = pjsip_endpt_send_request(endpt, tdata, -1, NULL,
+                                      &siprec_tag_request_cb);
+    if (status != PJ_SUCCESS)
+        return -9602;
+
+    if (!wait_until(&siprec_tag_response_seen, PJSUA_INVALID_ID, 8000)) {
+        drain_all_calls();
+        return -9603;
+    }
+    drain_all_calls();
+
+    if (g_siprec_tag.code / 100 != 2) {
+        PJ_LOG(1, (THIS_FILE, "    expected 2xx, got %d", g_siprec_tag.code));
+        return -9604;
+    }
+    if (!g_siprec_tag.supported) {
+        PJ_LOG(1, (THIS_FILE, "    \"siprec\" missing from Supported"));
+        return -9605;
+    }
+
+    return 0;
+}
+#endif
+
 /* RFC2543 call hold of a call whose local SDP has no connection line at all.
  *
  * With PJSUA_CALL_HOLD_TYPE_RFC2543, modify_sdp_of_call_hold() puts the hold
@@ -8371,6 +8490,12 @@ int pjsua_call_test(void)
 
     rc = test_reinvite_while_offer_pending(-9580);
     if (rc != 0) goto on_return;
+
+#if !PJSUA_HAS_SIPREC
+    /* Last: it adds "siprec" to the endpoint's Supported capabilities. */
+    rc = test_siprec_tag_without_siprec_support();
+    if (rc != 0) goto on_return;
+#endif
 
 
 on_return:

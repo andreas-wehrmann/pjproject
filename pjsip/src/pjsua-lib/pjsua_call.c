@@ -598,6 +598,20 @@ static int call_get_secure_level(pjsua_call *call)
 }
 */
 
+#if !PJSUA_HAS_SIPREC
+/* Without SIPREC support, "siprec" is an ordinary option tag that the
+ * application may announce with pjsip_endpt_add_capability().
+ */
+static unsigned siprec_tag_option(void)
+{
+    const pj_str_t STR_SIPREC = { "siprec", 6 };
+
+    return pjsip_endpt_has_capability(pjsua_var.endpt, PJSIP_H_SUPPORTED,
+                                      NULL, &STR_SIPREC) ?
+           PJSIP_INV_SUPPORT_SIPREC : 0;
+}
+#endif
+
 /* Outgoing call callback when media transport creation is completed. */
 static pj_status_t
 on_make_call_med_tp_complete(pjsua_call_id call_id,
@@ -686,6 +700,9 @@ on_make_call_med_tp_complete(pjsua_call_id call_id,
     }
     if (call->opt.flag & PJSUA_CALL_MEDIA_APP_MANAGED)
         options |= PJSIP_INV_SDP_PASSTHROUGH;
+#if !PJSUA_HAS_SIPREC
+    options |= siprec_tag_option();
+#endif
 
     status = pjsip_inv_create_uac( dlg, offer, options, &inv);
     if (status != PJ_SUCCESS) {
@@ -2469,6 +2486,8 @@ pj_bool_t pjsua_call_on_incoming(pjsip_rx_data *rdata)
      * invite session's permanent pool after call->inv is assigned.
      */
 
+#else
+    options |= siprec_tag_option();
 #endif
 
     if (pjsua_var.acc[acc_id].cfg.require_100rel == PJSUA_100REL_MANDATORY)

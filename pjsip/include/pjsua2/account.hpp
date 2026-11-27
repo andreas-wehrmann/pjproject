@@ -386,7 +386,8 @@ struct AccountCallConfig : public PersistentObject
 
     /**
      * Specify the usage of SIPREC INVITE request. See the
-     * pjsua_sip_siprec_use for possible values.
+     * pjsua_sip_siprec_use for possible values. Only used when
+     * PJSUA_HAS_SIPREC is enabled.
      * 
      * Default: PJSUA_SIP_SIPREC_INACTIVE
      */
@@ -404,6 +405,8 @@ struct AccountCallConfig : public PersistentObject
      * even without labels for better interoperability. Missing labels will
      * be logged as warnings for debugging purposes.
      *
+     * Only used when PJSUA_HAS_SIPREC is enabled.
+     *
      * Default: false (allow for interoperability)
      */
     bool siprecRequireLabel;
@@ -419,6 +422,8 @@ struct AccountCallConfig : public PersistentObject
      * When set to false (default), the SRS will accept SIPREC INVITEs
      * even without rs-metadata for better interoperability. Missing metadata
      * will be logged as warnings for debugging purposes.
+     *
+     * Only used when PJSUA_HAS_SIPREC is enabled.
      *
      * Default: false (allow for interoperability)
      */

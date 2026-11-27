@@ -487,8 +487,10 @@ typedef struct pj_stun_resolve_result pj_stun_resolve_result;
  * This feature is not fully implemented yet. Currently it only signals and
  * verifies siprec capability in Supported & Required headers in INVITE.
  *
- * When disabled, pjsua_acc_config.use_siprec is ignored. An application
- * may still announce the "siprec" option tag with
+ * When disabled, the use_siprec, siprec_require_label and
+ * siprec_require_metadata settings of #pjsua_config and #pjsua_acc_config
+ * are ignored, and on_call_siprec_metadata_update() is never called. An
+ * application may still announce the "siprec" option tag with
  * #pjsip_endpt_add_capability(), calls then accept and advertise it like
  * any other endpoint capability.
  *
@@ -1885,7 +1887,8 @@ typedef struct pjsua_callback
      * is needed.
      *
      * This callback is optional. When not set, metadata updates are
-     * handled internally without application notification.
+     * handled internally without application notification. It is never
+     * called when #PJSUA_HAS_SIPREC is disabled.
      *
      * @param call_id       The call index.
      * @param old_metadata   Previous metadata: NULL for the initial
@@ -2567,7 +2570,8 @@ typedef enum pjsua_sip_timer_use
 
 
 /**
- * This enumeration specifies the usage of SIPREC extension.
+ * This enumeration specifies the usage of SIPREC extension. It is only
+ * used when #PJSUA_HAS_SIPREC is enabled.
  */
 typedef enum pjsua_sip_siprec_use
 {
